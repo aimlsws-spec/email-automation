@@ -1,0 +1,33 @@
+# 🔐 Secrets (CRITICAL)
+.env
+.env.*
+token.json
+client_secret_*.json
+backend/.env
+frontend/.env
+
+# 🐍 Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.log
+venv/
+env/
+
+# 📦 Node / Frontend
+node_modules/
+dist/
+build/
+
+# 🧾 OS files
+.DS_Store
+Thumbs.db
+
+# 🛠 IDE
+.vscode/
+.idea/
+
+# 📁 Misc
+*.csv

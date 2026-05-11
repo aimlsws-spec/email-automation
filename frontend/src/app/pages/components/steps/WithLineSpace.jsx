@@ -1,0 +1,21 @@
+export function WithLineSpace() {
+  return (
+    <div className="max-w-xl">
+      <ol className="steps line-space">
+        {Array(4)
+          .fill(null)
+          .map((_, i) => (
+            <li
+              className="step before:bg-gray-200 dark:before:bg-surface-2"
+              key={i}
+            >
+              <div className="step-header rounded-full bg-gray-200 text-gray-800 dark:bg-surface-2 dark:text-white">
+                {i + 1}
+              </div>
+              <h3 className="text-gray-600 dark:text-dark-100">Step {i + 1}</h3>
+            </li>
+          ))}
+      </ol>
+    </div>
+  );
+}

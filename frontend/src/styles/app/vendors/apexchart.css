@@ -1,0 +1,112 @@
+.apexcharts-text {
+  @apply dark:text-dark-200 fill-current font-sans! text-gray-500;
+}
+
+.apexcharts-text.apexcharts-yaxis-label,
+.apexcharts-text.apexcharts-xaxis-label {
+  @apply dark:text-dark-300 fill-current! text-gray-400;
+}
+
+.apexcharts-legend-text {
+  @apply dark:text-dark-200! text-gray-500!;
+}
+
+.apexcharts-tooltip {
+  @apply border-gray-150! dark:border-dark-600! dark:bg-dark-700/[.85]! dark:text-dark-50! bg-white/[.85]! text-gray-700! shadow-none!;
+}
+
+.apexcharts-tooltip-title {
+  @apply border-gray-150! bg-gray-150! dark:bg-dark-900! dark:border-transparent!;
+}
+
+.apexcharts-xaxistooltip,
+.apexcharts-yaxistooltip {
+  @apply bg-gray-150! dark:border-dark-600! dark:bg-dark-900! dark:text-dark-100! rounded-sm border-gray-300! text-gray-600!;
+}
+
+.apexcharts-xaxistooltip:before {
+  @apply border-b-current! text-gray-300;
+}
+
+.dark .apexcharts-xaxistooltip:before {
+  @apply text-dark-600;
+}
+
+.apexcharts-xaxistooltip:after {
+  @apply text-gray-150 border-b-current!;
+}
+
+.dark .apexcharts-xaxistooltip:after {
+  @apply text-dark-900;
+}
+
+.apexcharts-yaxistooltip:before {
+  @apply border-l-current! text-gray-300;
+}
+
+.dark .apexcharts-yaxistooltip:before {
+  @apply text-dark-600;
+}
+
+.apexcharts-yaxistooltip:after {
+  @apply text-gray-150 border-l-current!;
+}
+
+.dark .apexcharts-yaxistooltip:after {
+  @apply text-dark-900;
+}
+
+.apexcharts-canvas .apexcharts-heatmap-rect,
+.apexcharts-canvas .apexcharts-xaxis-tick,
+.apexcharts-canvas line {
+  @apply dark:text-dark-500 stroke-current! text-gray-200;
+}
+
+.apexcharts-canvas .apexcharts-marker {
+  @apply text-gray-150 dark:text-dark-800 stroke-current!;
+}
+
+.apexcharts-canvas .apexcharts-radialbar-track .apexcharts-radialbar-area {
+  @apply text-gray-150 dark:text-dark-900 stroke-current!;
+}
+
+.apexcharts-canvas .apexcharts-datalabels-group .apexcharts-datalabel-label {
+  @apply dark:fill-dark-100 fill-gray-600 font-sans;
+}
+
+.apexcharts-canvas .apexcharts-datalabels-group .apexcharts-datalabel-value,
+.apexcharts-canvas .apexcharts-datalabels .apexcharts-datalabel {
+  @apply dark:fill-dark-200 fill-gray-500 font-sans;
+}
+
+.apexcharts-canvas .apexcharts-radar-series polygon {
+  @apply dark:fill-dark-800 dark:stroke-dark-600 fill-gray-100 stroke-gray-200;
+}
+
+.apexcharts-canvas .apexcharts-pie .apexcharts-pie-series .apexcharts-pie-area {
+  stroke: none;
+}
+
+.apexcharts-canvas line[stroke="transparent"] {
+  @apply hidden;
+}
+
+.apexcharts-menu {
+  @apply border-gray-150! dark:border-dark-500! dark:bg-dark-700! rounded-sm! bg-white!;
+}
+
+.apexcharts-menu .apexcharts-menu-item:hover {
+  @apply dark:bg-dark-600! bg-gray-100!;
+}
+
+.ax-transparent-gridline .apexcharts-gridline {
+  stroke: transparent !important;
+}
+
+.ax-rounded-b-lg .apexcharts-svg {
+  @apply rounded-b-lg;
+}
+
+.apexcharts-legend-marker {
+  @apply ltr:mr-2! rtl:ml-2!;
+}

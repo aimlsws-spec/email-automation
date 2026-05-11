@@ -1,0 +1,7 @@
+✅ DB connected successfully (Postgrace/PostgreSQL)
+Database: automate_mail
+Host: localhost
+email_logs sample: [{"type":"initial","status":"success","sent_at":"2026-04-28T12:10:48.886Z"},{"type":"initial","status":"success","sent_at":"2026-04-28T12:10:50.262Z"},{"type":"initial","status":"success","sent_at":"2026-04-28T12:10:51.584Z"},{"type":"initial","status":"success","sent_at":"2026-04-28T12:10:52.792Z"},{"type":"initial","status":"success","sent_at":"2026-04-28T12:10:54.138Z"}]
+✅ Leads table exists. Row count: 11
+leads sample: [{"status":"Sent","reply_detected_at":"","last_sent_date":"2026-04-28T12:10:48Z"},{"status":"Replied","reply_detected_at":"2026-04-29T04:33:29Z","last_sent_date":"2026-04-28T12:10:50Z"},{"status":"Sent","reply_detected_at":"","last_sent_date":"2026-04-28T12:10:51Z"},{"status":"Sent","reply_detected_at":"","last_sent_date":"2026-04-28T12:10:52Z"},{"status":"Sent","reply_detected_at":"","last_sent_date":"2026-04-28T12:10:54Z"}]
+log counts: [{"sent_today":"0","failed_today":"0","followups_today":"0","sent_total":"11"}]
