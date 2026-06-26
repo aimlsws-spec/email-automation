@@ -13,7 +13,9 @@ export default defineConfig({
   ],
   server: {
     proxy: {
-      '/api': 'http://localhost:4000',
+      '/api': process.env.VITE_API_BASE_URL || 'http://localhost:4000',
+      '/track': process.env.VITE_API_BASE_URL || 'http://localhost:4000',
+      '/auth': process.env.VITE_API_BASE_URL || 'http://localhost:4000',
     },
   },
 })

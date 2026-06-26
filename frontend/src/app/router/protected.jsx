@@ -53,6 +53,24 @@ const protectedRoutes = {
               path: "send-email",
               element: <Navigate to="/dashboards/send-emails" replace />,
             },
+            {
+              path: "leads",
+              lazy: async () => ({
+                Component: (await import("app/pages/dashboards/leads")).default,
+              }),
+            },
+            {
+              path: "queue-monitor",
+              lazy: async () => ({
+                Component: (await import("app/pages/dashboards/queue-monitor")).default,
+              }),
+            },
+            {
+              path: "followup-queue",
+              lazy: async () => ({
+                Component: (await import("app/pages/dashboards/followup-queue")).default,
+              }),
+            },
             // { path: "crm-analytics", lazy: async () => ({ Component: (await import("app/pages/dashboards/crm-analytics")).default }) },
             // { path: "orders", lazy: async () => ({ Component: (await import("app/pages/dashboards/orders")).default }) },
             // { path: "crypto/crypto-1", lazy: async () => ({ Component: (await import("app/pages/dashboards/crypto-1")).default }) },

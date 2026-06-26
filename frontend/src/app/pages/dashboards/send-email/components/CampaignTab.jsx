@@ -75,7 +75,7 @@ export function CampaignTab({
     <div className="grid grid-cols-12 gap-5">
       {/* Main form */}
       <Card className="col-span-12 p-5 lg:col-span-8">
-        <h3 className="mb-5 text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-dark-400">
+        <h3 className="mb-5 text-xs font-bold uppercase tracking-widest text-gray-800 dark:text-dark-100">
           Campaign Setup
         </h3>
 
@@ -261,7 +261,7 @@ export function CampaignTab({
 
       {/* Summary sidebar */}
       <Card className="col-span-12 p-5 lg:col-span-4">
-        <h3 className="mb-4 text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-dark-400">
+        <h3 className="mb-4 text-xs font-bold uppercase tracking-widest text-gray-800 dark:text-dark-100">
           Campaign Summary
         </h3>
 

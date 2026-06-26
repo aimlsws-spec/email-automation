@@ -33,7 +33,7 @@ const FOLLOWUP_SUBJECT_PATH = path.join(
   pythonProjectDir,
   'templates', 'followup_subject.txt'
 );
-const AGENT_NAME = 'Seawind Team';
+const AGENT_NAME = process.env.AGENT_NAME || 'Seawind Team';
 const TEST_SEND_LIMIT = 500;
 
 const IMAGE_URLS = {
@@ -65,7 +65,7 @@ function usePreviewSafeImages(html) {
     if (cid === IMAGE_URLS.logo) continue;
     finalHtml = finalHtml.replace(
       new RegExp(escapeRegExp(cid), 'g'),
-      `http://localhost:${PORT}/email-assets/${filename}`
+      `${process.env.BASE_URL || `http://localhost:${PORT}`}/email-assets/${filename}`
     );
   }
 
@@ -85,7 +85,7 @@ function renderTemplate(lead) {
     .replace(/\{\{\s*agentName\s*\}\}/g, AGENT_NAME)
     .replace(/\{\{\s*company\s*(?:\|\s*default\([^)]+\)\s*)?\}\}/g, escapeHtml(lead.company || 'your company'))
     .replace(/color:\s*#33(?=[;\s"])/g, 'color: #333333')
-    .replace(/\.\.\/unsubscribe\/\{\{\s*inquiryId\s*\}\}/g, 'https://seawindsolution.com/unsubscribe/{{inquiryId}}')
+    .replace(/\.\.\/unsubscribe\/\{\{\s*inquiryId\s*\}\}/g, `${process.env.APP_BASE_URL || 'https://seawindsolution.com'}/unsubscribe/{{inquiryId}}`)
     .replace(/\{\{\s*inquiryId\s*\}\}/g, encodeURIComponent(lead.email || ''))
     .replace(
       /<\/td>\s*<\/tr>\s*<tr>\s*<td style="background: #0049ac;/,

@@ -3,12 +3,15 @@ import { Card } from "components/ui";
 import { TemplateSelector } from "../TemplateSelector";
 import { TemplateEditor } from "../TemplateEditor";
 import { TemplatePreview } from "../TemplatePreview";
+import { LinkedFollowUpSection } from "./LinkedFollowUpSection";
 
 // ----------------------------------------------------------------------
 
 export function TemplateTab({
   templateHtml,
   setTemplateHtml,
+  templateType,
+  setTemplateType,
   selectedTemplateId,
   setSelectedTemplateId,
 }) {
@@ -26,10 +29,15 @@ export function TemplateTab({
         />
         <TemplateEditor
           templateId={selectedTemplateId}
-          onChange={setTemplateHtml}
+          onChange={(content, type) => {
+            setTemplateHtml(content);
+            if (type !== undefined) setTemplateType(type);
+          }}
+          onTypeChange={setTemplateType}
           onSaved={(saved) => {
             setSelectedTemplateId(saved.id);
             setTemplateHtml(saved.html_content);
+            setTemplateType(saved.template_type === "html" ? "html" : "text");
             setRefreshTrigger((t) => t + 1);
           }}
         />
@@ -37,8 +45,15 @@ export function TemplateTab({
 
       {/* Right: live preview */}
       <Card className="col-span-12 p-5 lg:col-span-5" style={{ minHeight: "640px" }}>
-        <TemplatePreview html={templateHtml} />
+        <TemplatePreview html={templateHtml} templateType={templateType} />
       </Card>
+
+      {/* Linked follow-up templates — shown once a template is saved/selected */}
+      {selectedTemplateId && (
+        <Card className="col-span-12 p-5">
+          <LinkedFollowUpSection templateId={selectedTemplateId} />
+        </Card>
+      )}
     </div>
   );
 }

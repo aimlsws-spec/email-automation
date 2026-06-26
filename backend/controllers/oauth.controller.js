@@ -33,9 +33,11 @@ async function googleCallback(req, res) {
 
   const { code, state: email } = req.query;
 
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
   if (!code || !email) {
     console.error('[OAuth Callback] Invalid params: Missing code or state (email)');
-    return res.redirect('http://localhost:5173/dashboards/send-emails?error=invalid_callback');
+    return res.redirect(`${FRONTEND_URL}/dashboards/send-emails?error=invalid_callback`);
   }
 
   try {
@@ -47,7 +49,7 @@ async function googleCallback(req, res) {
 
     if (!tokens.refresh_token) {
       console.error('[OAuth Callback] Refresh token missing from Google response.');
-      return res.redirect('http://localhost:5173/dashboards/send-emails?error=no_refresh_token');
+      return res.redirect(`${FRONTEND_URL}/dashboards/send-emails?error=no_refresh_token`);
     }
 
     console.log(`[OAuth Callback] Saving tokens to DB for ${email}`);
@@ -62,11 +64,11 @@ async function googleCallback(req, res) {
     );
 
     console.log('[OAuth Callback] DB Update successful. Row count:', dbResult.rowCount);
-    res.redirect('http://localhost:5173/dashboards/send-emails?success=connected');
+    res.redirect(`${FRONTEND_URL}/dashboards/send-emails?success=connected`);
 
   } catch (err) {
     console.error('[OAuth Callback] Exception occurred:', err.message);
-    res.redirect(`http://localhost:5173/dashboards/send-emails?error=${encodeURIComponent(err.message)}`);
+    res.redirect(`${FRONTEND_URL}/dashboards/send-emails?error=${encodeURIComponent(err.message)}`);
   }
 }
 

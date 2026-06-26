@@ -6,9 +6,6 @@ import clsx from "clsx";
 import SearchIcon from "assets/dualicons/search.svg?react";
 import { SidebarToggleBtn } from "components/shared/SidebarToggleBtn";
 import { Button } from "components/ui";
-import { Notifications } from "components/template/Notifications";
-import { RightSidebar } from "components/template/RightSidebar";
-import { LanguageSelector } from "components/template/LaguageSelector";
 import { Search } from "components/template/Search";
 import { useThemeContext } from "app/contexts/theme/context";
 
@@ -75,9 +72,6 @@ export function Header() {
             </>
           )}
         />
-        <Notifications />
-        <RightSidebar />
-        <LanguageSelector />
       </div>
     </header>
   );

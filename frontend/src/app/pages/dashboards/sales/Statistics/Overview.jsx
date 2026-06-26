@@ -109,18 +109,18 @@ export function Overview() {
         <Card key={label} className="flex justify-between p-5 border border-gray-100 dark:border-dark-700">
           <div className="flex flex-col justify-between">
             <div>
-              <p className="text-xs font-bold uppercase tracking-wider text-gray-400">{label}</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">{label}</p>
               <p className={`this:${color} mt-1 text-2xl font-black text-this dark:text-this-lighter`}>
                 {value}
               </p>
             </div>
-            
+
             <div className="mt-4 flex items-center gap-2">
-              <p className="text-[10px] font-bold uppercase text-gray-400 dark:text-dark-300">
+              <p className="text-xs font-semibold uppercase text-gray-400 dark:text-dark-300">
                 {subtext}
               </p>
               {trend && (trend.isPositive || trend.isNegative) && (
-                <div className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-black ${
+                <div className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[11px] font-semibold ${
                   trend.isPositive ? 'bg-success-100 text-success dark:bg-success-900/30' : 'bg-error-100 text-error dark:bg-error-900/30'
                 }`}>
                   {trend.isPositive ? <ArrowUpIcon className="size-3" /> : <ArrowDownIcon className="size-3" />}

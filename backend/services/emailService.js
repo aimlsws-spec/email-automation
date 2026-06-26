@@ -71,12 +71,15 @@ async function ensureEmailLogColumns() {
       message_id   TEXT,
       tracking_id  VARCHAR(255) DEFAULT '',
       status       VARCHAR(50) DEFAULT 'sent',
+      queue_job_id INT DEFAULT NULL,
       created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
       sent_at      DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
   await pool.query(`ALTER TABLE email_logs ADD COLUMN tracking_id VARCHAR(255) DEFAULT ''`).catch(() => {});
   await pool.query(`ALTER TABLE email_logs ADD COLUMN sender_email VARCHAR(255) DEFAULT ''`).catch(() => {});
+  await pool.query(`ALTER TABLE email_logs ADD COLUMN queue_job_id INT DEFAULT NULL`).catch(() => {});
+  await pool.query(`ALTER TABLE email_logs ADD INDEX idx_email_logs_job_id (queue_job_id)`).catch(() => {});
 }
 
 function getFromAddress() {
@@ -141,13 +144,13 @@ function createTrackingId() {
     : crypto.randomBytes(16).toString("hex");
 }
 
-function buildHumanFromName(senderEmail) {
-  // Extracts first name from email local part for a human-like From header.
-  // dhruvi@seawindsolution.in => "Dhruvi | Seawind Solution"
+function buildFromAddress(senderEmail, fromName) {
+  if (fromName && fromName.trim()) {
+    return `"${fromName.trim()}" <${senderEmail}>`;
+  }
   const local = senderEmail.split('@')[0] || '';
   const firstName = local.charAt(0).toUpperCase() + local.slice(1).split(/[._-]/)[0];
-  const displayName = process.env.FROM_NAME || 'Seawind Solution';
-  return `"${firstName} | ${displayName}" <${senderEmail}>`;
+  return `"${firstName}" <${senderEmail}>`;
 }
 
 function stripMarkdownFences(html) {
@@ -176,8 +179,61 @@ function injectVariables(html, lead) {
     .replace(/\{\{\s*company\s*(?:\|[^}]*)?\}\}/g, company)
     .replace(/\{\{inquiryId\}\}/g, inquiryId)
     .replace(/\{\{unsubscribe\}\}/g, inquiryId)
+    // {{unsubscribe_token}} — token IS the URL-encoded email; resolves at /api/unsubscribe?token=
+    .replace(/\{\{unsubscribe_token\}\}/g, inquiryId)
     // Strip any remaining unrecognised {{ }} so the worker never throws
     .replace(/\{\{[^}]*\}\}/g, '');
+}
+
+/**
+ * Wraps plain-text content in a minimal HTML envelope using <pre> with
+ * white-space:pre-wrap so Gmail / Outlook / Yahoo render line breaks and
+ * paragraph spacing exactly as typed without any normalisation.
+ * The plain-text is HTML-escaped before insertion — no HTML tags are injected
+ * into the user's content.
+ */
+function wrapTextAsHtml(text) {
+  const escaped = (text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return [
+    '<!DOCTYPE html>',
+    '<html><head>',
+    '<meta charset="UTF-8">',
+    '<meta name="viewport" content="width=device-width,initial-scale=1">',
+    '</head><body style="margin:0;padding:16px 20px;background:#ffffff">',
+    '<pre style="white-space:pre-wrap;word-wrap:break-word;',
+    'font-family:Arial,Helvetica,sans-serif;font-size:14px;',
+    'line-height:1.7;color:#222222;margin:0;padding:0;border:0">',
+    escaped,
+    '</pre></body></html>',
+  ].join('');
+}
+
+function buildTextOnlyMime({ from, to, subject, text, inReplyTo, references, unsubscribeEmail, entityRefId }) {
+  const senderDomain = (from.match(/@([\w.-]+)>?$/) || [])[1] || 'seawindsolution.com';
+  const mimeMessageId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@${senderDomain}>`;
+  const textB64 = Buffer.from(text || '', 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n');
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject || '', 'utf8').toString('base64')}?=`;
+
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${encodedSubject}`,
+    `Message-ID: ${mimeMessageId}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    `List-Unsubscribe: <mailto:${unsubscribeEmail}>`,
+    'List-Unsubscribe-Post: List-Unsubscribe=One-Click',
+    `X-Entity-Ref-ID: ${entityRefId}`,
+  ];
+  if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
+  if (references) lines.push(`References: ${references}`);
+  lines.push('', textB64);
+  return { mime: lines.join('\r\n'), mimeMessageId };
 }
 
 function buildMultipartMime({ from, to, subject, html, text, inReplyTo, references, unsubscribeEmail, entityRefId }) {
@@ -188,7 +244,8 @@ function buildMultipartMime({ from, to, subject, html, text, inReplyTo, referenc
   const mimeMessageId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@${senderDomain}>`;
 
   const htmlB64 = Buffer.from(html || '', 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n');
-  const textB64 = Buffer.from(text || '', 'utf8').toString('base64').match(/.{1,76}/g).join('\r\n');
+  const textB64 = Buffer.from(text || '', 'utf8').toString('base64').match(
+    /.{1,76}/g).join('\r\n');
   const encodedSubject = `=?UTF-8?B?${Buffer.from(subject || '', 'utf8').toString('base64')}?=`;
 
   const lines = [
@@ -200,8 +257,6 @@ function buildMultipartMime({ from, to, subject, html, text, inReplyTo, referenc
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     `List-Unsubscribe: <mailto:${unsubscribeEmail}>`,
     'List-Unsubscribe-Post: List-Unsubscribe=One-Click',
-    'Precedence: bulk',
-    'X-Mailer: Seawind Mailer',
     `X-Entity-Ref-ID: ${entityRefId}`,
   ];
   if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
@@ -260,9 +315,7 @@ async function sendViaSmtp(senderAccount, { from, to, subject, html, text, inRep
       headers: {
         'List-Unsubscribe':      unsubUrl || `<mailto:${unsubEmail}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-        'Precedence':            'bulk',
         'X-Entity-Ref-ID':       entityRefId,
-        'X-Mailer':              'Seawind Mailer',
         ...(inReplyTo ? { 'In-Reply-To': inReplyTo } : {}),
         ...(references ? { 'References':  references } : {}),
       },
@@ -288,7 +341,10 @@ async function sendViaSmtp(senderAccount, { from, to, subject, html, text, inRep
 async function sendViaGmail(senderEmail, { from, to, subject, html, text, inReplyTo, references, entityRefId, threadId }) {
   const gmail = await getGmailService(senderEmail);
   const unsubEmail = process.env.UNSUBSCRIBE_EMAIL || `unsubscribe@${senderEmail.split('@')[1]}`;
-  const { mime: rawMime, mimeMessageId } = buildMultipartMime({ from, to, subject, html, text, inReplyTo, references, unsubscribeEmail: unsubEmail, entityRefId });
+  const mimeArgs = { from, to, subject, text, inReplyTo, references, unsubscribeEmail: unsubEmail, entityRefId };
+  const { mime: rawMime, mimeMessageId } = (!html && text)
+    ? buildTextOnlyMime(mimeArgs)
+    : buildMultipartMime({ ...mimeArgs, html });
   const encodedMessage = Buffer.from(rawMime)
     .toString('base64')
     .replace(/\+/g, '-')
@@ -345,7 +401,7 @@ function resolveSubjectForLead(rawSubject, lead) {
   return resolved;
 }
 
-async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo, references, threadId, trackingId, recipientName, senderEmail, campaignId, disableTracking = false, lead = null }) {
+async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo, references, threadId, trackingId, recipientName, senderEmail, campaignId, fromName, disableTracking = false, lead = null, queueJobId = null }) {
   if (!to || !subject) throw new Error("sendEmail requires { to, subject }");
   if (!senderEmail) throw new Error("sendEmail requires senderEmail for multi-account support");
 
@@ -355,38 +411,49 @@ async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo,
     ? resolveSubjectForLead(subject, lead || { name: recipientName || '' })
     : (subject || '').trim();
   console.log(`[SUBJECT_STAGE] stage="sendEmail.entry" raw="${subject}" resolved="${resolvedSubject}"`);
-  const from        = buildHumanFromName(senderEmail);
+  const from        = buildFromAddress(senderEmail, fromName);
   const entityRefId = createTrackingId();
 
   // Unsubscribe URL using sender domain
   const senderDomain = senderEmail.split('@')[1] || 'viralkar.in';
   const unsubUrl = `<https://${senderDomain}/unsubscribe/${encodeURIComponent(trimmedTo)}>`;
 
-  // Plain text: always generated from HTML (multipart improves inbox placement)
-  const plainText = text || generatePlainText(html || '');
+  // Detect text-only mode: html is null but text body is provided
+  const isTextOnly = !html && text && text.trim().length > 0;
 
-  // Strip markdown code fences if template was accidentally stored with them
-  const sanitizedHtml = stripMarkdownFences(html || '');
-  const startsClean = /^<!doctype|^<html/i.test(sanitizedHtml);
-  console.log(`[EMAIL_HTML_SANITIZED] starts_clean=${startsClean} length=${sanitizedHtml.length} preview="${sanitizedHtml.slice(0, 60).replace(/\n/g, ' ')}"`);
-  console.log(`[EMAIL_SUBJECT_FINAL] subject="${resolvedSubject}"`);
-
-  // Tracking: disabled for first 20 sends to avoid spam signals
-  const trackedHtml = disableTracking
-    ? sanitizedHtml
-    : injectTracking(sanitizedHtml, trimmedTo, campaignId, senderEmail);
-
-  if (!trackedHtml || trackedHtml.length < 10) {
-    throw new Error('Template is empty — nothing to send');
+  let finalHtml, finalText, inline;
+  if (isTextOnly) {
+    if (text.trim().length < 5) throw new Error('Template is empty — nothing to send');
+    // Normalise to CRLF (RFC 2822) for the plain-text MIME part
+    finalText = text.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+    // Build a minimal HTML part so Gmail / Outlook render spacing identically
+    // to the in-app preview.  wrapTextAsHtml() HTML-escapes the content —
+    // no HTML tags are injected into the user's text.
+    finalHtml = wrapTextAsHtml(text);
+    inline    = { html: finalHtml, attachments: [] };
+    console.log(`[EMAIL_TEXT_MODE] chars=${text.length} → multipart/alternative with pre-wrap HTML`);
+  } else {
+    finalText = text || generatePlainText(html || '');
+    const sanitizedHtml = stripMarkdownFences(html || '');
+    const startsClean = /^<!doctype|^<html/i.test(sanitizedHtml);
+    console.log(`[EMAIL_HTML_SANITIZED] starts_clean=${startsClean} length=${sanitizedHtml.length} preview="${sanitizedHtml.slice(0, 60).replace(/\n/g, ' ')}"`);
+    const trackedHtml = disableTracking
+      ? sanitizedHtml
+      : injectTracking(sanitizedHtml, trimmedTo, campaignId, senderEmail);
+    if (!trackedHtml || trackedHtml.length < 10) {
+      throw new Error('Template is empty — nothing to send');
+    }
+    inline = prepareInlineImages(trackedHtml);
+    finalHtml = inline.html;
   }
 
+  console.log(`[EMAIL_SUBJECT_FINAL] subject="${resolvedSubject}"`);
   console.log('DELIVERABILITY MODE ACTIVE');
   console.log("FINAL SUBJECT USED:", resolvedSubject);
   console.log("SENDER:", senderEmail);
   console.log("TO:", trimmedTo);
   console.log("CAMPAIGN:", campaignId);
 
-  const inline = prepareInlineImages(trackedHtml);
   await ensureEmailLogColumns();
   await ensureEmailEventsTable();
 
@@ -410,10 +477,10 @@ async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo,
   let sendResult;
   if (accountType === 'smtp') {
     console.log(`[SUBJECT_STAGE] stage="sendMail.payload" transport="smtp" subject="${resolvedSubject}"`);
-    sendResult = await sendViaSmtp(guard.sender, { from, to: trimmedTo, subject: resolvedSubject, html: inline.html, text: plainText, inReplyTo, references, entityRefId, unsubUrl });
+    sendResult = await sendViaSmtp(guard.sender, { from, to: trimmedTo, subject: resolvedSubject, html: finalHtml, text: finalText, inReplyTo, references, entityRefId, unsubUrl });
   } else {
     console.log(`[SUBJECT_STAGE] stage="sendMail.payload" transport="gmail_api" subject="${resolvedSubject}"`);
-    sendResult = await sendViaGmail(senderEmail, { from, to: trimmedTo, subject: resolvedSubject, html: inline.html, text: plainText, inReplyTo, references, entityRefId, threadId });
+    sendResult = await sendViaGmail(senderEmail, { from, to: trimmedTo, subject: resolvedSubject, html: finalHtml, text: finalText, inReplyTo, references, entityRefId, threadId });
   }
   console.log("EMAIL SENT via", accountType.toUpperCase());
 
@@ -424,11 +491,11 @@ async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo,
   const finalTrackingId = trackingId || createTrackingId();
 
   await pool.query(
-    `INSERT INTO email_logs (lead_email, to_email, email, type, subject, status, provider, message_id, tracking_id, sender_email)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [trimmedTo, trimmedTo, trimmedTo, type, resolvedSubject, 'sent', accountType, messageId, finalTrackingId, senderEmail]
+    `INSERT INTO email_logs (lead_email, to_email, email, type, subject, status, provider, message_id, tracking_id, sender_email, queue_job_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [trimmedTo, trimmedTo, trimmedTo, type, resolvedSubject, 'sent', accountType, messageId, finalTrackingId, senderEmail, queueJobId || null]
   );
-  console.log(`[SUBJECT_STAGE] stage="email_logs.insert" subject="${resolvedSubject}"`);
+  console.log(`[EMAIL_SENT] job=${queueJobId || 'direct'} campaign=${campaignId} lead=${trimmedTo} ts=${new Date().toISOString()} provider=${accountType} sender=${senderEmail}`);
 
   await pool.query(
     `INSERT INTO email_events (

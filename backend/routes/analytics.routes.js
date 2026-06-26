@@ -145,6 +145,28 @@ router.get('/api/analytics/overview', async (req, res) => {
   }
 });
 
+// GET /api/analytics/unsubscribes — unsubscribe clicks from link_clicks
+router.get('/api/analytics/unsubscribes', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        lc.lead_email,
+        lc.campaign_id,
+        MAX(lc.clicked_at) AS clicked_at,
+        ANY_VALUE(c.name) AS campaign_name
+      FROM link_clicks lc
+      LEFT JOIN campaigns c ON CAST(lc.campaign_id AS UNSIGNED) = c.id
+      WHERE lc.type = 'unsubscribe' OR lc.url LIKE '%unsubscribe%'
+      GROUP BY lc.lead_email, lc.campaign_id
+      ORDER BY MAX(lc.clicked_at) DESC
+      LIMIT 500
+    `);
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // GET /api/analytics/link-activity - Returns recent click events
 router.get('/api/analytics/link-activity', async (req, res) => {
   try {
@@ -160,7 +182,7 @@ router.get('/api/analytics/link-activity', async (req, res) => {
       FROM link_clicks lc
       LEFT JOIN campaigns c ON CAST(lc.campaign_id AS UNSIGNED) = c.id
       ORDER BY lc.clicked_at DESC
-      LIMIT 50
+      LIMIT 500
     `);
     res.json({ success: true, data: rows });
   } catch (err) {
@@ -173,76 +195,123 @@ router.get('/api/analytics/link-activity', async (req, res) => {
 router.get('/api/analytics/activity', async (req, res) => {
   try {
     const range = req.query.range || 'daily';
-    let interval = '7 days';
-    let groupBy = 'day';
 
-    if (range === 'monthly') {
-      interval = '30 days';
-      groupBy = 'day';
-    } else if (range === 'yearly') {
-      interval = '1 year';
-      groupBy = 'month';
+    // daily   = last 30 days,   each bar = 1 day   (DATE_FORMAT → '%Y-%m-%d' string)
+    // monthly = last 12 months, each bar = 1 month  (DATE_FORMAT → '%Y-%m'    string)
+    // yearly  = last 5 years,   each bar = 1 year   (DATE_FORMAT → '%Y'       string)
+    // Using DATE_FORMAT (not DATE()) so mysql2 keeps the result as a plain string
+    // instead of converting it to a JS Date object, which breaks object-key lookups.
+    let days, intervalSql, dateFmt, replyDateFmt;
+    if (range === 'yearly') {
+      days         = 5;
+      intervalSql  = '5 YEAR';
+      dateFmt      = `DATE_FORMAT(sent_at, '%Y')`;
+      replyDateFmt = `DATE_FORMAT(last_activity_at, '%Y')`;
+    } else if (range === 'monthly') {
+      days         = 12;
+      intervalSql  = '12 MONTH';
+      dateFmt      = `DATE_FORMAT(sent_at, '%Y-%m')`;
+      replyDateFmt = `DATE_FORMAT(last_activity_at, '%Y-%m')`;
+    } else {
+      // daily (default)
+      days         = 30;
+      intervalSql  = '30 DAY';
+      dateFmt      = `DATE_FORMAT(sent_at, '%Y-%m-%d')`;
+      replyDateFmt = `DATE_FORMAT(last_activity_at, '%Y-%m-%d')`;
     }
 
-    const days = range === 'yearly' ? 12 : 7;
-    const dateFmt = range === 'yearly'
-      ? `DATE_FORMAT(sent_at, '%Y-%m')`
-      : `DATE(sent_at)`;
-    const replyFmt = range === 'yearly'
-      ? `DATE_FORMAT(reply_detected_at, '%Y-%m')`
-      : `DATE(reply_detected_at)`;
-
     const [sentRows, followupRows, replyRows] = await Promise.all([
+      // "Sent" = all outbound emails that are NOT follow-ups.
+      // We deliberately avoid `type = 'initial'` because older email_queue rows
+      // were inserted without a type column, leaving the field NULL — and
+      // NULL = 'initial' is always FALSE in MySQL.
       pool.query(`
         SELECT ${dateFmt} AS date, COUNT(*) AS cnt
         FROM email_logs
-        WHERE status IN ('sent', 'success') AND type = 'initial'
-          AND sent_at >= NOW() - INTERVAL ${range === 'yearly' ? '12 MONTH' : '7 DAY'}
+        WHERE status IN ('sent', 'success')
+          AND (type IS NULL OR type = 'initial'
+               OR (type NOT LIKE 'follow_up_%' AND type != 'manual_followup'))
+          AND sent_at >= NOW() - INTERVAL ${intervalSql}
         GROUP BY 1 ORDER BY 1
       `),
       pool.query(`
         SELECT ${dateFmt} AS date, COUNT(*) AS cnt
         FROM email_logs
-        WHERE status IN ('sent', 'success') AND type LIKE 'follow_up_%'
-          AND sent_at >= NOW() - INTERVAL ${range === 'yearly' ? '12 MONTH' : '7 DAY'}
+        WHERE status IN ('sent', 'success')
+          AND (type LIKE 'follow_up_%' OR type = 'manual_followup')
+          AND sent_at >= NOW() - INTERVAL ${intervalSql}
         GROUP BY 1 ORDER BY 1
       `),
+      // Replies: use has_replied flag + last_activity_at (proper DATETIME).
+      // Avoids the reply_detected_at VARCHAR comparison that silently returns 0.
       pool.query(`
-        SELECT ${replyFmt} AS date, COUNT(*) AS cnt
+        SELECT ${replyDateFmt} AS date, COUNT(*) AS cnt
         FROM leads
-        WHERE reply_detected_at IS NOT NULL AND reply_detected_at != ''
-          AND reply_detected_at >= NOW() - INTERVAL ${range === 'yearly' ? '12 MONTH' : '7 DAY'}
+        WHERE has_replied = 1
+          AND last_activity_at IS NOT NULL
+          AND last_activity_at >= NOW() - INTERVAL ${intervalSql}
         GROUP BY 1 ORDER BY 1
       `),
     ]);
 
     const toMap = (rows) => Object.fromEntries(rows.map(r => [r.date, parseInt(r.cnt)]));
-    const sentMap = toMap(sentRows.rows);
+    const sentMap     = toMap(sentRows.rows);
     const followupMap = toMap(followupRows.rows);
-    const replyMap = toMap(replyRows.rows);
+    const replyMap    = toMap(replyRows.rows);
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const localDate  = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const localMonth = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
 
     const dateKeys = [];
     for (let i = days - 1; i >= 0; i--) {
       const d = new Date();
       if (range === 'yearly') {
+        d.setFullYear(d.getFullYear() - i);
+        dateKeys.push(String(d.getFullYear()));
+      } else if (range === 'monthly') {
         d.setMonth(d.getMonth() - i);
-        dateKeys.push(d.toISOString().slice(0, 7));
+        dateKeys.push(localMonth(d));
       } else {
         d.setDate(d.getDate() - i);
-        dateKeys.push(d.toISOString().slice(0, 10));
+        dateKeys.push(localDate(d));
       }
     }
 
-    const rows = dateKeys.map(date => ({
+    const result = dateKeys.map(date => ({
       date,
-      sent: sentMap[date] || 0,
+      sent:     sentMap[date]     || 0,
       followups: followupMap[date] || 0,
-      replies: replyMap[date] || 0,
+      replies:  replyMap[date]    || 0,
     }));
 
-    res.json(rows);
+    res.json(result);
   } catch (err) {
     console.error('❌ /api/analytics/activity ERROR:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/analytics/debug-logs — temporary diagnostic, remove after confirming chart works
+router.get('/api/analytics/debug-logs', async (req, res) => {
+  try {
+    const [counts, sample, replyCount] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*) AS total_rows,
+          SUM(CASE WHEN status IN ('sent','success') THEN 1 ELSE 0 END) AS status_sent_success,
+          SUM(CASE WHEN type IS NULL THEN 1 ELSE 0 END)  AS type_null,
+          SUM(CASE WHEN type = 'initial' THEN 1 ELSE 0 END) AS type_initial,
+          SUM(CASE WHEN type LIKE 'follow_up_%' THEN 1 ELSE 0 END) AS type_followup,
+          MIN(sent_at) AS oldest_sent_at,
+          MAX(sent_at) AS newest_sent_at
+        FROM email_logs
+      `),
+      pool.query(`SELECT type, status, DATE(sent_at) AS day, COUNT(*) AS cnt FROM email_logs GROUP BY type, status, DATE(sent_at) ORDER BY day DESC LIMIT 30`),
+      pool.query(`SELECT COUNT(*) AS replied_leads, MAX(last_activity_at) AS latest_reply FROM leads WHERE has_replied = 1`),
+    ]);
+    res.json({ summary: counts.rows[0], breakdown: sample.rows, replies: replyCount.rows[0] });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

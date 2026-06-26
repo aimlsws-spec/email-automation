@@ -10,12 +10,6 @@ import { Fragment, useEffect, useRef } from "react";
 import {
   MagnifyingGlassIcon,
   ChevronRightIcon,
-  ChatBubbleBottomCenterIcon,
-  CloudIcon,
-  CurrencyDollarIcon,
-  ViewColumnsIcon,
-  ShoppingBagIcon,
-  RocketLaunchIcon,
 } from "@heroicons/react/24/outline";
 import invariant from "tiny-invariant";
 import { Link } from "react-router";
@@ -26,66 +20,16 @@ import { Avatar, Button, Input } from "components/ui";
 import { useDisclosure, useFuse } from "hooks";
 import { useThemeContext } from "app/contexts/theme/context";
 import { createScopedKeydownHandler } from "utils/dom/createScopedKeydownHandler";
-import { navigation } from "app/navigation";
 import { NAV_TYPE_COLLAPSE } from "constants/app.constant";
 import { Highlight } from "components/shared/Highlight";
-import { settings } from "app/navigation/settings";
+import { dashboards } from "app/navigation/dashboards";
 
 // ----------------------------------------------------------------------
 
-const popular = [
-  {
-    id: "0",
-    Icon: RocketLaunchIcon,
-    title: "Documentation",
-    color: "primary",
-    to: "/docs/getting-started",
-  },
-  {
-    id: "1",
-    Icon: ViewColumnsIcon,
-    title: "Kanban",
-    color: "success",
-    to: "/apps/kanban",
-  },
-  {
-    id: "2",
-    Icon: CurrencyDollarIcon,
-    title: "Analytics",
-    color: "warning",
-    to: "/dashboards/crm-analytics",
-  },
-  {
-    id: "3",
-    Icon: ChatBubbleBottomCenterIcon,
-    title: "Chat",
-    color: "info",
-    to: "/apps/chat",
-  },
-  {
-    id: "4",
-    Icon: CloudIcon,
-    title: "File Manager",
-    color: "error",
-    to: "/apps/filemanager",
-  },
-  {
-    id: "5",
-    Icon: ShoppingBagIcon,
-    title: "Orders",
-    color: "info",
-    to: "/dashboards/orders",
-  },
-  {
-    id: "6",
-    Icon: CurrencyDollarIcon,
-    title: "Sales",
-    color: "success",
-    to: "/dashboards/sales",
-  },
-];
+// Only surface the Email Workflow pages in search.
+const data = flattenNav([dashboards]);
 
-const data = flattenNav([...navigation, settings]);
+const POPULAR_COLORS = ["primary", "success", "warning", "info", "error", "secondary"];
 
 export function Search({ renderButton }) {
   const [isOpen, { open, close }] = useDisclosure(false);
@@ -182,22 +126,22 @@ export function SearchDialog({ close }) {
       {result.length === 0 && query === "" && (
         <div className="mt-4">
           <h3 className="px-4 text-gray-800 dark:text-dark-50 sm:px-5">
-            Popular searcch
+            Popular
           </h3>
           <div className="mt-3 flex flex-wrap gap-3.5 px-4">
-            {popular.map(({ id, to, Icon, title, color }) => (
+            {data.map(({ path, Icon, title }, i) => (
               <Link
-                key={id}
-                to={to}
+                key={path}
+                to={path}
                 onClick={close}
                 className="w-14 shrink-0 text-center"
               >
                 <Avatar
                   size={12}
-                  initialColor={color}
+                  initialColor={POPULAR_COLORS[i % POPULAR_COLORS.length]}
                   classNames={{ display: "rounded-2xl" }}
                 >
-                  <Icon className="size-5 stroke-2" />
+                  {Icon ? <Icon className="size-5 stroke-2" /> : null}
                 </Avatar>
 
                 <p className="mt-1.5 truncate whitespace-nowrap text-xs text-gray-800 dark:text-dark-100">

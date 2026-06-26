@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { getAllDomainStats } = require('../services/eventTracker.service');
-const { resetDailyCounters } = require('../services/domainWarmup.service');
+const { resetDailyCounters } = require('../services/senderWarmup.service');
 const { resetSenderCounts } = require('../services/senderPool.service');
 const { trackEvent } = require('../services/eventTracker.service');
 
@@ -51,7 +51,7 @@ router.post('/api/warmup/reset', async (req, res) => {
   try {
     const { domain } = req.body || {};
     if (domain) {
-      await pool.query(`UPDATE domain_warmup SET current_sent = 0 WHERE domain = ?`, [domain]);
+      await pool.query(`UPDATE sender_warmup SET current_sent = 0 WHERE LOWER(sender_email) LIKE ?`, [`%@${domain.toLowerCase()}`]);
       await pool.query(`UPDATE sender_accounts SET daily_sent_count = 0 WHERE LOWER(email) LIKE ?`, [`%@${domain.toLowerCase()}`]);
       console.log(`[WARMUP/RESET] Manual reset for domain: ${domain}`);
       return res.json({ success: true, message: `Warmup counter reset for ${domain}` });

@@ -159,14 +159,64 @@ async function resetDailyDomainStats() {
 
 async function getAllDomainStats() {
   await ensureTables();
-  const { rows } = await pool.query(`SELECT * FROM domain_stats ORDER BY total_sent DESC`);
-  return rows.map(r => ({
-    ...r,
-    reply_rate:  r.total_sent > 0 ? parseFloat((r.total_replied / r.total_sent * 100).toFixed(1)) : 0,
-    bounce_rate: r.total_sent > 0 ? parseFloat((r.total_bounced / r.total_sent * 100).toFixed(1)) : 0,
-    spam_rate:   r.total_sent > 0 ? parseFloat((r.spam_reports  / r.total_sent * 100).toFixed(1)) : 0,
-    status: domainHealthStatus(r.reputation_score || 100),
-  }));
+
+  // Compute metrics from leads (ground truth) filtered to real sending domains only.
+  // Excludes recipient domains like gmail.com by cross-referencing sender_accounts.
+  // Uses a derived table to satisfy MySQL ONLY_FULL_GROUP_BY.
+  const { rows } = await pool.query(`
+    SELECT
+      agg.domain,
+      agg.total_leads,
+      agg.total_sent,
+      agg.total_bounced,
+      agg.total_replied,
+      COALESCE(ds.spam_reports, 0) AS spam_reports,
+      COALESCE(ds.daily_sent,   0) AS daily_sent
+    FROM (
+      SELECT
+        SUBSTRING_INDEX(l.sender_email, '@', -1)                                      AS domain,
+        COUNT(*)                                                                       AS total_leads,
+        SUM(CASE WHEN l.status NOT IN ('Pending','Failed') THEN 1 ELSE 0 END)        AS total_sent,
+        SUM(CASE WHEN l.is_bounced = 1 THEN 1 ELSE 0 END)                            AS total_bounced,
+        SUM(CASE WHEN l.has_replied = 1 OR l.replied = 1 THEN 1 ELSE 0 END)         AS total_replied
+      FROM leads l
+      WHERE l.sender_email IS NOT NULL
+        AND l.sender_email <> ''
+        AND SUBSTRING_INDEX(l.sender_email, '@', -1) IN (
+          SELECT DISTINCT SUBSTRING_INDEX(email, '@', -1) FROM sender_accounts
+        )
+      GROUP BY SUBSTRING_INDEX(l.sender_email, '@', -1)
+    ) AS agg
+    LEFT JOIN domain_stats ds ON ds.domain = agg.domain
+    ORDER BY agg.total_sent DESC
+  `);
+
+  return rows.map(r => {
+    const total_sent    = parseInt(r.total_sent)    || 0;
+    const total_bounced = parseInt(r.total_bounced) || 0;
+    const total_replied = parseInt(r.total_replied) || 0;
+    const spam_reports  = parseInt(r.spam_reports)  || 0;
+
+    const bounce_rate = total_sent > 0 ? parseFloat((total_bounced / total_sent * 100).toFixed(1)) : null;
+    const reply_rate  = total_sent > 0 ? parseFloat((total_replied / total_sent * 100).toFixed(1)) : null;
+    const spam_rate   = total_sent > 0 ? parseFloat((spam_reports  / total_sent * 100).toFixed(1)) : null;
+    const score       = calculateReputationScore({ total_sent, total_bounced, total_replied, spam_reports });
+
+    return {
+      domain:           r.domain,
+      total_leads:      parseInt(r.total_leads) || 0,
+      total_sent,
+      total_bounced,
+      total_replied,
+      spam_reports,
+      daily_sent:       parseInt(r.daily_sent) || 0,
+      reputation_score: score,
+      bounce_rate,
+      reply_rate,
+      spam_rate,
+      status: domainHealthStatus(score),
+    };
+  });
 }
 
 module.exports = { trackEvent, incrementDomainStats, resetDailyDomainStats, getAllDomainStats, domainHealthStatus };

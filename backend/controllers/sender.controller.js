@@ -1,6 +1,6 @@
 const pool = require('../db');
 const { getSenderStats } = require('../services/senderService');
-const { getOrCreateRecord, domainFromEmail } = require('../services/domainWarmup.service');
+const { getOrCreateRecord, domainFromEmail } = require('../services/senderWarmup.service');
 const { ensureSenderInPool } = require('../services/senderPool.service');
 
 exports.getSenders = async (req, res) => {

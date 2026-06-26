@@ -60,13 +60,13 @@ export function SendInitialEmailCard() {
 
         <div className="grid grid-cols-2 gap-4 border-t border-white/10 pt-3">
            <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-white/60">Daily Capacity</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-white/60">Daily Capacity</p>
               <p className="text-lg font-black text-white">
                 {loading && !senderInfo ? "..." : `${senderInfo?.sentToday || 0}/${senderInfo?.dailyCapacity || 0}`}
               </p>
            </div>
            <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-white/60">Remaining</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-white/60">Remaining</p>
               <p className="text-lg font-black text-white">
                 {loading && !senderInfo ? "..." : remainingCapacity}
               </p>
@@ -75,7 +75,7 @@ export function SendInitialEmailCard() {
       </div>
 
       {!hasActiveSenders && !loading && (
-        <div className="mt-4 flex items-center gap-2 rounded bg-error-400/20 p-2 text-[10px] font-bold text-white">
+        <div className="mt-4 flex items-center gap-2 rounded bg-error-400/20 p-2 text-xs font-semibold text-white">
           <ExclamationTriangleIcon className="size-3.5" />
           <span>Add sender account in Settings to start</span>
         </div>

@@ -92,7 +92,7 @@ export function SenderTab({
         {/* Mode selector */}
         <Card className="col-span-12 p-5 md:col-span-4">
           <div className="mb-4 flex items-center justify-between">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-dark-400">
+            <h4 className="text-xs font-bold uppercase tracking-widest text-gray-500 dark:text-dark-400">
               Sending Mode
             </h4>
             <Button variant="flat" size="sm" className="gap-1.5" onClick={handleAddAccount}>
@@ -207,7 +207,7 @@ export function SenderTab({
 
         {/* Account usage bars */}
         <Card className="col-span-12 p-5 md:col-span-8">
-          <h4 className="mb-4 text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-dark-400">
+          <h4 className="mb-4 text-xs font-bold uppercase tracking-widest text-gray-500 dark:text-dark-400">
             {sendingMode === "domain" ? "SMTP Account Usage" : "Gmail Account Usage"}
           </h4>
 

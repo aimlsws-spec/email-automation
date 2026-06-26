@@ -6,7 +6,7 @@ import { fetchTemplates, deleteTemplate } from "services/api";
 
 export function TemplateSelector({ selectedId, onSelect, onNew, refreshTrigger }) {
   const [templates, setTemplates] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading,   setLoading]   = useState(true);
 
   const load = async () => {
     setLoading(true);
@@ -31,7 +31,7 @@ export function TemplateSelector({ selectedId, onSelect, onNew, refreshTrigger }
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-dark-400">
+        <label className="text-xs font-bold uppercase tracking-widest text-gray-500 dark:text-dark-400">
           Saved Templates
         </label>
         <div className="flex items-center gap-1">
@@ -44,7 +44,7 @@ export function TemplateSelector({ selectedId, onSelect, onNew, refreshTrigger }
           </button>
           <button
             onClick={onNew}
-            className="flex items-center gap-1 rounded-lg bg-primary-600 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-primary-700"
+            className="flex items-center gap-1 rounded-lg bg-primary-600 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-white hover:bg-primary-700"
           >
             <PlusIcon className="size-3" /> New
           </button>
@@ -57,29 +57,42 @@ export function TemplateSelector({ selectedId, onSelect, onNew, refreshTrigger }
         </p>
       ) : (
         <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-200 dark:border-dark-600">
-          {templates.map((t) => (
-            <div
-              key={t.id}
-              onClick={() => onSelect(t.id)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => e.key === 'Enter' && onSelect(t.id)}
-              className={`group flex w-full cursor-pointer items-center justify-between px-3 py-2.5 text-left text-sm transition-colors border-b border-gray-100 last:border-0 dark:border-dark-700 ${
-                selectedId === t.id
-                  ? "bg-primary-50 text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
-                  : "hover:bg-gray-50 text-gray-700 dark:text-dark-200 dark:hover:bg-dark-700"
-              }`}
-            >
-              <span className="truncate font-medium">{t.name}</span>
-              <button
-                onClick={(e) => handleDelete(e, t.id)}
-                className="ml-2 shrink-0 rounded p-0.5 text-gray-300 opacity-0 transition-opacity hover:text-error group-hover:opacity-100 dark:text-dark-500"
-                title="Delete template"
+          {templates.map((t) => {
+            const isText = t.template_type === "text";
+            return (
+              <div
+                key={t.id}
+                onClick={() => onSelect(t.id)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === "Enter" && onSelect(t.id)}
+                className={`group flex w-full cursor-pointer items-center justify-between px-3 py-2.5 text-left text-sm transition-colors border-b border-gray-100 last:border-0 dark:border-dark-700 ${
+                  selectedId === t.id
+                    ? "bg-primary-50 text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
+                    : "hover:bg-gray-50 text-gray-700 dark:text-dark-200 dark:hover:bg-dark-700"
+                }`}
               >
-                <TrashIcon className="size-3.5" />
-              </button>
-            </div>
-          ))}
+                <span className="truncate font-medium flex-1 min-w-0">{t.name}</span>
+
+                {/* Type badge */}
+                <span className={`ml-2 shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${
+                  isText
+                    ? "bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400"
+                    : "bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400"
+                }`}>
+                  {isText ? "TEXT" : "HTML"}
+                </span>
+
+                <button
+                  onClick={(e) => handleDelete(e, t.id)}
+                  className="ml-2 shrink-0 rounded p-0.5 text-gray-300 opacity-0 transition-opacity hover:text-error group-hover:opacity-100 dark:text-dark-500"
+                  title="Delete template"
+                >
+                  <TrashIcon className="size-3.5" />
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

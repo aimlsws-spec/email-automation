@@ -117,6 +117,49 @@ export async function fetchCampaign(id) {
   return getJSON(`${BASE}/campaigns/${id}`);
 }
 
+export async function deleteQueueItems(ids) {
+  const res = await fetch(`${BASE}/queue/items`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  return res.json();
+}
+
+export async function deleteFollowupQueueItems(items) {
+  try {
+    const res = await fetch(`${BASE}/followup-queue/items`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Delete followup queue items failed: ${res.status} ${text}`);
+      return { success: false, error: `HTTP ${res.status}: ${text}` };
+    }
+    return res.json();
+  } catch (err) {
+    console.error('Delete followup queue items network error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+export async function deleteCampaign(id) {
+  try {
+    const res = await fetch(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Delete campaign failed: ${res.status} ${text}`);
+      return { success: false, error: `HTTP ${res.status}: ${text}` };
+    }
+    return res.json();
+  } catch (err) {
+    console.error('Delete campaign network error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
 export async function fetchAnalyticsActivity(range = 'daily') {
   const json = await getJSON(`${BASE}/analytics/activity?range=${range}`);
   return json || [];
@@ -138,13 +181,13 @@ export async function fetchTemplate(id) {
   return json?.success ? json.data : null;
 }
 
-export async function saveTemplate({ id, name, html_content }) {
+export async function saveTemplate({ id, name, html_content, template_type }) {
   const method = id ? 'PUT' : 'POST';
   const url = id ? `${BASE}/templates/${id}` : `${BASE}/templates`;
   const res = await fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, html_content }),
+    body: JSON.stringify({ name, html_content, template_type: template_type || 'html' }),
   });
   const text = await res.text();
   if (!text) throw new Error('Server returned empty response — check backend logs');
@@ -161,4 +204,84 @@ export async function deleteTemplate(id) {
   let json;
   try { json = JSON.parse(text); } catch { throw new Error('Invalid JSON from server'); }
   if (!json.success) throw new Error(json.error || 'Failed to delete template');
+}
+
+// Follow-up Templates (campaign-linked)
+export async function fetchFollowupTemplates(campaignTemplateId) {
+  // Use a direct fetch instead of the shared getJSON so we can distinguish
+  // a genuine server error from a "route not yet available" 404, and avoid
+  // flooding the console when the backend is temporarily unreachable.
+  try {
+    const res = await fetch(
+      `${BASE}/followup-templates?campaign_template_id=${campaignTemplateId}`,
+      { cache: 'no-store' }
+    );
+    if (!res.ok) {
+      // 404 means the route isn't registered yet (server restart pending).
+      // Return empty array silently — the UI shows "no stages" rather than crashing.
+      if (res.status !== 404) {
+        console.error(`[followup-templates] API error ${res.status}`);
+      }
+      return [];
+    }
+    const json = await res.json().catch(() => null);
+    return json?.success ? json.data : [];
+  } catch {
+    // Network error or JSON parse failure — return empty array silently.
+    return [];
+  }
+}
+
+export async function saveFollowupTemplate({ id, campaign_template_id, followup_stage, delay_value, delay_unit, subject, body }) {
+  const method = id ? 'PUT' : 'POST';
+  const url    = id ? `${BASE}/followup-templates/${id}` : `${BASE}/followup-templates`;
+  const payload = id
+    ? { delay_value, delay_unit, subject, body }
+    : { campaign_template_id, followup_stage, delay_value, delay_unit, subject, body };
+  const res = await fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  if (!text) throw new Error('Server returned empty response');
+  let json;
+  try { json = JSON.parse(text); } catch { throw new Error('Invalid JSON from server: ' + text.slice(0, 200)); }
+  if (!json.success) throw new Error(json.error || 'Failed to save follow-up template');
+  return json.data;
+}
+
+export async function deleteFollowupTemplate(id) {
+  const res = await fetch(`${BASE}/followup-templates/${id}`, { method: 'DELETE' });
+  const text = await res.text();
+  if (!text) throw new Error('Server returned empty response');
+  let json;
+  try { json = JSON.parse(text); } catch { throw new Error('Invalid JSON from server'); }
+  if (!json.success) throw new Error(json.error || 'Failed to delete follow-up template');
+}
+
+// ─── Queue Monitor ────────────────────────────────────────────────────────────
+
+export async function fetchQueueStats() {
+  const json = await getJSON(`${BASE}/queue/stats`);
+  return json?.success ? json.data : null;
+}
+
+export async function fetchQueueSenders() {
+  const json = await getJSON(`${BASE}/queue/senders`);
+  return json?.success ? json.data : [];
+}
+
+export async function fetchQueueList(params = {}) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') qs.set(k, v); });
+  const json = await getJSON(`${BASE}/queue/list?${qs}`);
+  return json?.success ? { data: json.data, total: json.total, page: json.page, limit: json.limit } : { data: [], total: 0, page: 1, limit: 50 };
+}
+
+export async function fetchFollowupQueueList(params = {}) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') qs.set(k, v); });
+  const json = await getJSON(`${BASE}/followup-queue/list?${qs}`);
+  return json?.success ? { data: json.data, total: json.total, page: json.page, limit: json.limit } : { data: [], total: 0, page: 1, limit: 50 };
 }

@@ -9,17 +9,6 @@ import {
 } from "@heroicons/react/24/outline";
 import { CheckCircleIcon as CheckCircleSolid } from "@heroicons/react/24/solid";
 
-// ─── Schedule definition (mirrors backend) ──────────────────────────────────
-const SCHEDULE = [
-  { stage: 1, day: 1,  template: "FOLLOW UP (VIRALKAR)" },
-  { stage: 2, day: 3,  template: "FOLLOW UP 2 (VIRALKAR)" },
-  { stage: 3, day: 7,  template: "FOLLOW UP (VIRALKAR)" },
-  { stage: 4, day: 11, template: "FOLLOW UP 2 (VIRALKAR)" },
-  { stage: 5, day: 15, template: "FOLLOW UP (VIRALKAR)" },
-  { stage: 6, day: 20, template: "FOLLOW UP 2 (VIRALKAR)" },
-  { stage: 7, day: 25, template: "FOLLOW UP (VIRALKAR)" },
-];
-
 // ─── Status badge ────────────────────────────────────────────────────────────
 function StatusBadge({ lead }) {
   if (!lead) return null;
@@ -155,6 +144,8 @@ export function FollowUpPanel({ campaignId = null }) {
 
   useEffect(() => {
     fetchAnalytics();
+    const interval = setInterval(fetchAnalytics, 30_000);
+    return () => clearInterval(interval);
   }, [fetchAnalytics]);
 
   async function fetchTimeline(email) {
@@ -250,78 +241,6 @@ export function FollowUpPanel({ campaignId = null }) {
           </div>
         ))}
       </div>
-
-      {/* ── 30-day schedule preview ── */}
-      <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-dark-600 dark:bg-dark-800">
-        <h4 className="mb-4 text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-dark-400">
-          30-Day Automated Schedule
-        </h4>
-        <div className="flex flex-wrap gap-2">
-          {SCHEDULE.map((s) => (
-            <div
-              key={s.stage}
-              className="flex flex-col items-center rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-center dark:border-dark-600 dark:bg-dark-700"
-            >
-              <span className="text-[10px] font-bold uppercase text-gray-400 dark:text-dark-400">
-                Day {s.day}
-              </span>
-              <span className="mt-0.5 text-xs font-semibold text-gray-700 dark:text-dark-200">
-                Stage {s.stage}
-              </span>
-              <span className="mt-0.5 max-w-[90px] truncate text-[10px] text-primary-600 dark:text-primary-400">
-                {s.template.replace(" (VIRALKAR)", "")}
-              </span>
-            </div>
-          ))}
-          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-gray-300 bg-gray-50 px-3 py-2 dark:border-dark-600 dark:bg-dark-700">
-            <span className="text-[10px] font-bold uppercase text-gray-400">Day 30</span>
-            <span className="mt-0.5 text-xs font-semibold text-error">STOP</span>
-          </div>
-        </div>
-        <p className="mt-3 text-xs text-gray-400 dark:text-dark-400">
-          Alternates between both templates automatically. Stops on reply, unsubscribe, or bounce.
-          All emails stay in the same thread with <code className="rounded bg-gray-100 px-1 dark:bg-dark-700">Re:</code> prefix.
-        </p>
-      </div>
-
-      {/* ── Stage analytics ── */}
-      {analytics?.stageSummary?.length > 0 && (
-        <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-dark-600 dark:bg-dark-800">
-          <h4 className="mb-4 text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-dark-400">
-            Performance by Stage
-          </h4>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100 dark:border-dark-600">
-                  <th className="pb-2 text-left text-xs font-semibold text-gray-500">Stage</th>
-                  <th className="pb-2 text-left text-xs font-semibold text-gray-500">Template</th>
-                  <th className="pb-2 text-right text-xs font-semibold text-gray-500">Sent</th>
-                  <th className="pb-2 text-right text-xs font-semibold text-gray-500">Replies</th>
-                  <th className="pb-2 text-right text-xs font-semibold text-gray-500">Rate</th>
-                </tr>
-              </thead>
-              <tbody>
-                {analytics.stageSummary.map((row) => (
-                  <tr key={row.followup_stage} className="border-b border-gray-50 dark:border-dark-700">
-                    <td className="py-2 font-medium text-gray-700 dark:text-dark-200">
-                      Stage {row.followup_stage}
-                    </td>
-                    <td className="py-2 text-xs text-gray-500 dark:text-dark-400">
-                      {(row.template_used || "").replace(" (VIRALKAR)", "")}
-                    </td>
-                    <td className="py-2 text-right text-gray-700 dark:text-dark-200">{row.total_sent}</td>
-                    <td className="py-2 text-right text-success">{row.replies_after}</td>
-                    <td className="py-2 text-right font-semibold text-primary-600">
-                      {row.reply_rate ?? 0}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
       {/* ── Per-lead controls ── */}
       <div className="rounded-xl border border-gray-200 bg-white p-5 dark:border-dark-600 dark:bg-dark-800">

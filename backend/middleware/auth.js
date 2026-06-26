@@ -35,7 +35,9 @@ function authMiddleware(req, res, next) {
     }
 
     // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new Error('JWT_SECRET not configured');
+    const decoded = jwt.verify(token, jwtSecret);
 
     // Attach user info to request
     req.user = {

@@ -3,10 +3,13 @@ const router = express.Router();
 const pool = require('../db');
 const { renderTemplate, usePreviewSafeImages } = require('../utils/templateRenderer');
 
+// Ensure template_type column exists (idempotent)
+pool.query(`ALTER TABLE email_templates ADD COLUMN template_type VARCHAR(10) NOT NULL DEFAULT 'html'`).catch(() => {});
+
 // GET /api/templates
 router.get('/api/templates', async (req, res) => {
   try {
-    const { rows } = await pool.query(`SELECT id, name, created_at, updated_at FROM email_templates ORDER BY updated_at DESC`);
+    const { rows } = await pool.query(`SELECT id, name, template_type, created_at, updated_at FROM email_templates ORDER BY updated_at DESC`);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('[GET /api/templates] Error:', err.message);
@@ -29,12 +32,16 @@ router.get('/api/templates/:id', async (req, res) => {
 // POST /api/templates
 router.post('/api/templates', async (req, res) => {
   try {
-    const { name, html_content } = req.body;
+    const { name, html_content, template_type } = req.body;
     if (!name || !html_content) return res.status(400).json({ success: false, error: 'name and html_content required' });
-    const safe = String(html_content).replace(/<script[\s\S]*?<\/script>/gi, '');
+    const type = template_type === 'text' ? 'text' : 'html';
+    // Only sanitize scripts for HTML templates; plain text needs no sanitization
+    const safe = type === 'html'
+      ? String(html_content).replace(/<script[\s\S]*?<\/script>/gi, '')
+      : String(html_content);
     await pool.query(
-      `INSERT INTO email_templates (name, html_content) VALUES (?, ?)`,
-      [name.trim(), safe]
+      `INSERT INTO email_templates (name, html_content, template_type) VALUES (?, ?, ?)`,
+      [name.trim(), safe, type]
     );
     const { rows: idRows } = await pool.query(`SELECT LAST_INSERT_ID() AS insertId`);
     const newId = idRows[0]?.insertId;
@@ -51,12 +58,15 @@ router.post('/api/templates', async (req, res) => {
 // PUT /api/templates/:id
 router.put('/api/templates/:id', async (req, res) => {
   try {
-    const { name, html_content } = req.body;
+    const { name, html_content, template_type } = req.body;
     if (!name || !html_content) return res.status(400).json({ success: false, error: 'name and html_content required' });
-    const safe = String(html_content).replace(/<script[\s\S]*?<\/script>/gi, '');
+    const type = template_type === 'text' ? 'text' : 'html';
+    const safe = type === 'html'
+      ? String(html_content).replace(/<script[\s\S]*?<\/script>/gi, '')
+      : String(html_content);
     await pool.query(
-      `UPDATE email_templates SET name = ?, html_content = ?, updated_at = NOW() WHERE id = ?`,
-      [name.trim(), safe, req.params.id]
+      `UPDATE email_templates SET name = ?, html_content = ?, template_type = ?, updated_at = NOW() WHERE id = ?`,
+      [name.trim(), safe, type, req.params.id]
     );
     const { rows } = await pool.query(`SELECT * FROM email_templates WHERE id = ?`, [req.params.id]);
     if (!rows[0]) return res.status(404).json({ success: false, error: 'Template not found' });

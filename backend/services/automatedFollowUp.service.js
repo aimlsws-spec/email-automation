@@ -18,8 +18,9 @@
 
 const pool = require('../db');
 const { sendEmail, injectVariables, resolveSubjectForLead } = require('./emailService');
-const { canSendEmail, incrementDomainCount, domainFromEmail } = require('./domainWarmup.service');
+const { canSendEmail, incrementSenderCount, domainFromEmail } = require('./senderWarmup.service');
 const { generatePlainText } = require('../utils/plainText');
+const { addUnsubscribe, isUnsubscribed } = require('./unsubscribe.service');
 
 // ─── Follow-up schedule: [{ day, templateSlot }] ────────────────────────────
 // templateSlot 1 = "FOLLOW UP (VIRALKAR)", 2 = "FOLLOW UP 2 (VIRALKAR)"
@@ -189,6 +190,26 @@ function shouldSendFollowUp(lead) {
   if (new Date() < new Date(lead.next_follow_up_at)) return { ok: false, reason: 'not_due_yet' };
   if ((lead.follow_up_step ?? 0) >= MAX_STAGE) return { ok: false, reason: 'max_stage_reached' };
   return { ok: true };
+}
+
+function normalizedStatus(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isCampaignPaused(lead) {
+  if (lead.campaign_followup_enabled === 0 || lead.campaign_followup_enabled === false) return true;
+  return ['paused', 'archived', 'stopped', 'cancelled', 'canceled'].includes(normalizedStatus(lead.campaign_status));
+}
+
+function logFollowUpCheck(lead, automationEnabled, isSelected) {
+  const followupStatus = lead.campaign_followup_enabled === 0 || lead.campaign_followup_enabled === false
+    ? 'paused'
+    : normalizedStatus(lead.campaign_status) || 'active';
+
+  console.log(
+    `[FOLLOWUP_CHECK] campaign_id=${lead.campaign_id || ''} campaign_name=${JSON.stringify(lead.campaign_name || '')} ` +
+    `automation_status=${automationEnabled ? 'active' : 'paused'} followup_status=${followupStatus} is_selected=${isSelected}`
+  );
 }
 
 // ─── Core send logic ─────────────────────────────────────────────────────────
@@ -371,6 +392,7 @@ async function runAutomatedFollowUpScheduler() {
     const { rows: dueleads } = await pool.query(`
       SELECT
         l.*,
+        c.name AS campaign_name,
         c.subject AS campaign_subject,
         c.followup_enabled AS campaign_followup_enabled,
         c.status AS campaign_status
@@ -384,7 +406,7 @@ async function runAutomatedFollowUpScheduler() {
         AND l.next_follow_up_at IS NOT NULL
         AND l.next_follow_up_at <= NOW()
         AND (c.followup_enabled = 1 OR c.followup_enabled IS NULL)
-        AND (c.status IS NULL OR LOWER(c.status) NOT IN ('paused', 'archived', 'stopped'))
+        AND (c.status IS NULL OR LOWER(c.status) NOT IN ('paused', 'archived', 'stopped', 'cancelled', 'canceled'))
       ORDER BY l.next_follow_up_at ASC
       LIMIT 30
     `, [MAX_STAGE]);
@@ -398,8 +420,9 @@ async function runAutomatedFollowUpScheduler() {
 
     for (const lead of dueleads) {
       try {
-        // Double-check suppression list
-        const suppressed = await isInSuppressionList(lead.email);
+        logFollowUpCheck(lead, automationEnabled, true);
+        // Double-check both suppression_list and unsubscribed_contacts
+        const suppressed = await isUnsubscribed(lead.email);
         if (suppressed) {
           await stopFollowUp(lead.email, 'suppressed');
           skipped++;
@@ -417,12 +440,26 @@ async function runAutomatedFollowUpScheduler() {
           continue;
         }
 
-        // Domain warmup check
+        const latestAutomationEnabled = await isGlobalAutomationEnabled();
+        const { rows: latestCampaignRows } = await pool.query(
+          `SELECT id, name AS campaign_name, status AS campaign_status, followup_enabled AS campaign_followup_enabled
+           FROM campaigns WHERE id = ? LIMIT 1`,
+          [lead.campaign_id]
+        );
+        const latestLeadState = { ...lead, ...(latestCampaignRows[0] || {}) };
+        logFollowUpCheck(latestLeadState, latestAutomationEnabled, false);
+        if (!latestAutomationEnabled || isCampaignPaused(latestLeadState)) {
+          console.log(`[FOLLOWUP_SKIP] campaign_id=${lead.campaign_id || ''} reason=paused`);
+          skipped++;
+          continue;
+        }
+
+        // Sender warmup check
         const senderEmail = lead.sender_email || process.env.DEFAULT_SENDER_EMAIL;
         if (senderEmail) {
-          const domain = domainFromEmail(senderEmail);
-          const warmupOk = await canSendEmail(domain);
+          const warmupOk = await canSendEmail(senderEmail);
           if (!warmupOk) {
+            const domain = domainFromEmail(senderEmail);
             console.warn(`[FOLLOWUP_AUTO] Domain ${domain} warmup limit — pausing batch`);
             break;
           }
@@ -456,7 +493,7 @@ async function runAutomatedFollowUpScheduler() {
         console.log(`[AUTO FOLLOWUP] SENT ${lead.email} nextStage=${nextStage}`);
 
         if (senderEmail) {
-          await incrementDomainCount(domainFromEmail(senderEmail)).catch(() => {});
+          await incrementSenderCount(senderEmail).catch(() => {});
         }
 
         sent++;
@@ -528,7 +565,7 @@ async function handleUnsubscribe(email, campaignId = null, ipAddress = null, use
     ON DUPLICATE KEY UPDATE reason = 'unsubscribe', added_at = NOW()
   `, [email, campaignId, ipAddress, userAgent]);
 
-  // Stop all follow-ups
+  // Stop all follow-ups and mark lead as unsubscribed
   await pool.query(`
     UPDATE leads
     SET unsubscribed         = 1,
@@ -541,7 +578,11 @@ async function handleUnsubscribe(email, campaignId = null, ipAddress = null, use
     WHERE email = ?
   `, [email]);
 
-  console.log(`[FOLLOWUP_AUTO] Unsubscribed: ${email} — added to suppression list`);
+  // Write to unsubscribed_contacts — this is what Unsubscribe Management reads
+  await addUnsubscribe({ email, campaignId, ipAddress, userAgent, source: 'email_link' })
+    .catch(err => console.error(`[FOLLOWUP_AUTO] addUnsubscribe failed for ${email}:`, err.message));
+
+  console.log(`[FOLLOWUP_AUTO] Unsubscribed: ${email} — suppression list, leads, and unsubscribed_contacts updated`);
 }
 
 // ─── Bounce handling ──────────────────────────────────────────────────────────
@@ -605,8 +646,22 @@ async function getFollowUpAnalytics(campaignId = null) {
       fl.followup_stage,
       fl.template_used,
       COUNT(*) AS total_sent,
-      SUM(CASE WHEN l.has_replied = 1 THEN 1 ELSE 0 END) AS replies_after,
-      ROUND(SUM(CASE WHEN l.has_replied = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS reply_rate
+      SUM(
+        CASE WHEN l.has_replied = 1
+          AND l.last_activity_at IS NOT NULL
+          AND fl.sent_at IS NOT NULL
+          AND l.last_activity_at >= fl.sent_at
+        THEN 1 ELSE 0 END
+      ) AS replies_after,
+      ROUND(
+        SUM(
+          CASE WHEN l.has_replied = 1
+            AND l.last_activity_at IS NOT NULL
+            AND fl.sent_at IS NOT NULL
+            AND l.last_activity_at >= fl.sent_at
+          THEN 1 ELSE 0 END
+        ) * 100.0 / NULLIF(COUNT(*), 0), 2
+      ) AS reply_rate
     FROM followup_logs fl
     LEFT JOIN leads l ON fl.lead_email = l.email
     ${campaignId ? 'WHERE fl.campaign_id = ?' : ''}

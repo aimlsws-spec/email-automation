@@ -97,15 +97,14 @@ async function main() {
   const lead = readyRows[0];
   console.log(`[LEAD]     id=${lead.id}  step=${lead.follow_up_step}  sender=${lead.sender_email}  message_id=${lead.message_id || '—'}`);
 
-  // ── 4. Check domain warmup allows sending ────────────────────────────
-  const { canSendEmail, domainFromEmail, incrementDomainCount } = require('../services/domainWarmup.service');
-  const domain = domainFromEmail(SENDER_EMAIL);
-  const warmupOk = await canSendEmail(domain);
+  // ── 4. Check sender warmup allows sending ────────────────────────────
+  const { canSendEmail, incrementSenderCount } = require('../services/senderWarmup.service');
+  const warmupOk = await canSendEmail(SENDER_EMAIL);
   if (!warmupOk) {
-    console.error(`FAIL: Domain warmup limit reached for ${domain}. Cannot send today.`);
+    console.error(`FAIL: Sender warmup limit reached for ${SENDER_EMAIL}. Cannot send today.`);
     process.exit(1);
   }
-  console.log(`[WARMUP]   ${domain} — OK to send`);
+  console.log(`[WARMUP]   ${SENDER_EMAIL} — OK to send`);
 
   // ── 5. Send the follow-up ────────────────────────────────────────────
   console.log('\n[SEND]     Invoking sendFollowUp now…\n');
@@ -125,8 +124,8 @@ async function main() {
     process.exit(1);
   }
 
-  // ── 6. Increment domain counter (mirrors scheduler behaviour) ────────
-  await incrementDomainCount(domain).catch(() => {});
+  // ── 6. Increment sender counter (mirrors scheduler behaviour) ────────
+  await incrementSenderCount(SENDER_EMAIL).catch(() => {});
 
   // ── 7. Verify DB state ───────────────────────────────────────────────
   const { rows: afterLead } = await pool.query(`SELECT * FROM leads WHERE email = ? LIMIT 1`, [TARGET_EMAIL]);

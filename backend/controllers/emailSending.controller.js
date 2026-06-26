@@ -1,13 +1,15 @@
 const pool = require('../db');
 const { renderTemplate, TEST_SEND_LIMIT } = require('../utils/templateRenderer');
 const sendingState = require('../utils/sendingState');
+const { recalculateCampaignStats } = require('../services/campaignStats.service');
 
 // POST /api/send-bulk-initial - sends pending initial emails through Gmail or domain SMTP
 async function sendBulkInitial(req, res) {
   console.log("[SEND] Campaign started");
   console.log("REQ BODY:", req.body);
   try {
-    const { campaignName, subject, senderEmail, sendingMode, domainAccounts, gmailAccounts, templateHtml, campaignId: incomingCampaignId } = req.body;
+    const { campaignName, subject, fromName, senderEmail, sendingMode, domainAccounts, gmailAccounts, templateHtml, templateType, campaignId: incomingCampaignId, initialTemplateId } = req.body;
+    const resolvedTemplateType = templateType === 'text' ? 'text' : 'html';
 
     if (!campaignName) return res.status(400).json({ success: false, message: 'Campaign Name is required' });
     if (!subject) return res.status(400).json({ success: false, message: 'Subject is required' });
@@ -37,8 +39,10 @@ async function sendBulkInitial(req, res) {
 
     // Ensure campaign columns exist BEFORE using them
     await pool.query(`ALTER TABLE campaigns ADD COLUMN template_html TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE campaigns ADD COLUMN template_type VARCHAR(10) NOT NULL DEFAULT 'html'`).catch(() => {});
     await pool.query(`ALTER TABLE campaigns ADD COLUMN sending_type VARCHAR(50) DEFAULT 'domain'`).catch(() => {});
     await pool.query(`ALTER TABLE campaigns ADD COLUMN gmail_accounts JSON`).catch(() => {});
+    await pool.query(`ALTER TABLE campaigns ADD COLUMN from_name VARCHAR(255) DEFAULT NULL`).catch(() => {});
 
     let campaignId;
 
@@ -46,22 +50,22 @@ async function sendBulkInitial(req, res) {
     if (incomingCampaignId) {
       campaignId = incomingCampaignId;
       await pool.query(
-        `UPDATE campaigns SET subject = ?, status = 'Running', sending_type = ?, gmail_accounts = ?, sender_email = ?, template_html = ?, domain_accounts = ? WHERE id = ?`,
-        [subject, sendingType, sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : null, fixedSender, templateHtml || null, sendingType === 'domain' ? JSON.stringify(domainAccounts) : null, campaignId]
+        `UPDATE campaigns SET subject = ?, from_name = ?, status = 'Running', sending_type = ?, gmail_accounts = ?, sender_email = ?, template_html = ?, template_type = ?, domain_accounts = ? WHERE id = ?`,
+        [subject, fromName || null, sendingType, sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : null, fixedSender, templateHtml || null, resolvedTemplateType, sendingType === 'domain' ? JSON.stringify(domainAccounts) : null, campaignId]
       );
     } else {
       const campaignCheck = await pool.query('SELECT id FROM campaigns WHERE name = ?', [campaignName]);
       if (campaignCheck.rows.length > 0) {
         campaignId = campaignCheck.rows[0].id;
         await pool.query(
-          `UPDATE campaigns SET subject = ?, status = 'Running', sending_type = ?, gmail_accounts = ?, sender_email = ?, template_html = ?, domain_accounts = ? WHERE id = ?`,
-          [subject, sendingType, sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : null, fixedSender, templateHtml || null, sendingType === 'domain' ? JSON.stringify(domainAccounts) : null, campaignId]
+          `UPDATE campaigns SET subject = ?, from_name = ?, status = 'Running', sending_type = ?, gmail_accounts = ?, sender_email = ?, template_html = ?, template_type = ?, domain_accounts = ? WHERE id = ?`,
+          [subject, fromName || null, sendingType, sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : null, fixedSender, templateHtml || null, resolvedTemplateType, sendingType === 'domain' ? JSON.stringify(domainAccounts) : null, campaignId]
         );
       } else {
         await pool.query(
-          `INSERT INTO campaigns (name, subject, status, sending_type, gmail_accounts, sender_email, template_html, domain_accounts)
-           VALUES (?, ?, 'Running', ?, ?, ?, ?, ?)`,
-          [campaignName, subject, sendingType, sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : null, fixedSender, templateHtml || null, sendingType === 'domain' ? JSON.stringify(domainAccounts) : null]
+          `INSERT INTO campaigns (name, subject, status, sending_type, gmail_accounts, sender_email, template_html, template_type, domain_accounts)
+           VALUES (?, ?, 'Running', ?, ?, ?, ?, ?, ?)`,
+          [campaignName, subject, sendingType, sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : null, fixedSender, templateHtml || null, resolvedTemplateType, sendingType === 'domain' ? JSON.stringify(domainAccounts) : null]
         );
         const { rows: lastIdRows } = await pool.query(`SELECT LAST_INSERT_ID() AS insertId`);
         campaignId = lastIdRows[0]?.insertId;
@@ -73,6 +77,11 @@ async function sendBulkInitial(req, res) {
           campaignId = newCamp[0]?.id;
         }
       }
+    }
+
+    // Store the selected campaign template ID so queueWorker can schedule linked follow-ups
+    if (initialTemplateId && campaignId) {
+      await pool.query(`UPDATE campaigns SET initial_template_id = ? WHERE id = ?`, [initialTemplateId, campaignId]).catch(() => {});
     }
 
     console.log(`[SEND] Campaign ${campaignId} | sending_type=${sendingType} | sender=${sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : JSON.stringify(domainAccounts)}`);
@@ -97,6 +106,7 @@ async function sendBulkInitial(req, res) {
     }
 
     let sent = 0;
+    let skipped = 0;
     console.log("TOTAL LEADS:", pending.length);
 
     // Round-robin index for domain accounts
@@ -105,6 +115,19 @@ async function sendBulkInitial(req, res) {
     try {
       for (const lead of pending) {
         try {
+          const claim = await pool.query(
+            `UPDATE leads
+             SET status = 'Queued', last_activity_at = NOW()
+             WHERE email = ? AND campaign_id = ? AND status = 'Pending'`,
+            [lead.email, campaignId]
+          );
+          const claimed = claim?.affectedRows ?? claim?.rowCount ?? 0;
+          if (claimed === 0) {
+            skipped++;
+            console.log(`[QUEUE_SKIP] ${lead.email} campaign=${campaignId} already queued/sent`);
+            continue;
+          }
+
           const finalSubject = subject || lead.campaign_subject;
           if (!finalSubject) throw new Error('Subject is required');
           const baseHtml = templateHtml || renderTemplate(lead);
@@ -116,11 +139,21 @@ async function sendBulkInitial(req, res) {
           }
 
           console.log("QUEUE ADD:", campaignId, lead.email);
-          await pool.query(
-            `INSERT INTO email_queue (lead_email, campaign_id, subject, html_body, status, sending_mode, sender_email)
-             VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
-            [lead.email, campaignId, finalSubject, baseHtml, sendingType, jobSender]
-          );
+          try {
+            await pool.query(
+              `INSERT INTO email_queue (lead_email, campaign_id, subject, html_body, status, sending_mode, sender_email)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+              [lead.email, campaignId, finalSubject, baseHtml, sendingType, jobSender]
+            );
+            console.log(`[QUEUE_ADD] campaign=${campaignId} recipient=${lead.email} sender=${jobSender || 'worker-rotation'} status=pending`);
+          } catch (insertErr) {
+            await pool.query(
+              `UPDATE leads SET status = 'Pending', last_activity_at = NOW()
+               WHERE email = ? AND campaign_id = ? AND status = 'Queued'`,
+              [lead.email, campaignId]
+            ).catch(() => {});
+            throw insertErr;
+          }
           sent++;
         } catch (err) {
           console.error("QUEUE FAILED:", lead.email, err.message);
@@ -140,10 +173,16 @@ async function sendBulkInitial(req, res) {
     );
     console.log('FINAL PENDING FOR CAMPAIGN', campaignId, ':', pendingCountRes.rows[0].cnt);
 
+    const stats = await recalculateCampaignStats(campaignId, fixedSender);
+    console.log(`[SEND] Campaign stats after queue: campaign=${campaignId} total=${stats?.total ?? 0} pending=${stats?.pending ?? 0} sent=${stats?.sent ?? 0}`);
+
     return res.status(200).json({
       success: true,
       sent,
-      message: `${sent} email(s) queued for campaign.`
+      skipped,
+      message: skipped > 0
+        ? `${sent} email(s) queued. ${skipped} duplicate/already queued lead(s) skipped.`
+        : `${sent} email(s) queued for campaign.`
     });
   } catch (err) {
     console.error('SEND ERROR:', err);

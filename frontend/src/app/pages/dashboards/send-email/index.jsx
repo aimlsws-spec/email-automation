@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router";
-import { EnvelopeIcon } from "@heroicons/react/24/outline";
+
 import { Page } from "components/shared/Page";
 import { TemplateTab } from "./components/TemplateTab";
 import { CampaignTab } from "./components/CampaignTab";
@@ -15,6 +15,7 @@ export default function SendEmail() {
 
   // ── Shared template state ──────────────────────────────────────────────
   const [templateHtml, setTemplateHtml] = useState("");
+  const [templateType, setTemplateType] = useState("text"); // "text" | "html"
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
 
   // ── Shared campaign state ──────────────────────────────────────────────
@@ -179,6 +180,8 @@ export default function SendEmail() {
         domainAccounts: sendingMode === "domain" ? domainAccounts : undefined,
         senderEmail: sendingMode === "domain" ? smtpSender : undefined,
         templateHtml: templateHtml || undefined,
+        templateType: templateType || "text",
+        initialTemplateId: selectedTemplateId || undefined,
       };
 
       console.log("[SEND] payload campaignId:", uploadedCampaignId, "senderEmail:", smtpSender);
@@ -218,8 +221,12 @@ export default function SendEmail() {
       <div className="transition-content px-(--margin-x) pb-8">
         {/* Header */}
         <div className="flex items-center gap-3 py-5 lg:py-6">
-          <EnvelopeIcon className="size-6 text-primary-600 dark:text-primary-400" />
-          <h2 className="text-xl font-medium text-gray-800 dark:text-dark-100">
+          <img
+            src="https://www.seawindsolution.com/assets/front/images/Seawind-logo-1.png"
+            alt="Seawind"
+            className="size-6 object-contain"
+          />
+          <h2 className="text-xl font-semibold text-gray-800 dark:text-dark-100">
             Send Email
           </h2>
         </div>
@@ -246,6 +253,8 @@ export default function SendEmail() {
           <TemplateTab
             templateHtml={templateHtml}
             setTemplateHtml={setTemplateHtml}
+            templateType={templateType}
+            setTemplateType={setTemplateType}
             selectedTemplateId={selectedTemplateId}
             setSelectedTemplateId={setSelectedTemplateId}
           />

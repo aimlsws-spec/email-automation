@@ -57,12 +57,25 @@ export default function CampaignDetails() {
   if (loading) return <Page title="Campaign Details"><div className="p-8">Loading...</div></Page>;
   if (!campaign) return <Page title="Campaign Details"><div className="p-8 text-error">Campaign not found</div></Page>;
 
-  const summary = campaign?.summary || { total: 0, sent: 0, pending: 0, failed: 0, replied: 0 };
+  const summary = campaign?.summary || { total: 0, sent: 0, pending: 0, failed: 0, replied: 0, completed: 0 };
   const isCompleted = summary.total > 0 && summary.pending === 0;
 
-  const progress = summary.total > 0 
-    ? Math.round((summary.sent / summary.total) * 100) 
-    : 0;
+  const totalLeads = parseInt(summary.total) || 0;
+  const sentLeads = parseInt(summary.sent) || 0;
+  const repliedLeads = parseInt(summary.replied) || 0;
+  // completed counts: Sent + Delivered + Replied + Completed + FollowupCompleted (OR has_replied=1)
+  const completedLeads = parseInt(summary.completed) || Math.min(sentLeads + repliedLeads, totalLeads);
+  const calculatedProgress = totalLeads > 0 ? Math.round((completedLeads / totalLeads) * 100) : 0;
+
+  console.log('[PROGRESS_DEBUG]', {
+    totalLeads,
+    sentLeads,
+    repliedLeads,
+    completedLeads,
+    calculatedProgress
+  });
+
+  const progress = calculatedProgress;
 
   const replyRate = summary.sent > 0
     ? parseFloat((parseInt(summary.replied || 0) / summary.sent * 100).toFixed(1))
@@ -119,7 +132,7 @@ export default function CampaignDetails() {
                 <stat.icon className="size-6" />
               </div>
               <div>
-                <p className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-0.5">{stat.label}</p>
+                <p className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-0.5">{stat.label}</p>
                 <p className="text-2xl font-black text-gray-800 dark:text-dark-100 leading-none">{stat.value}</p>
                 {stat.extra && <p className="text-xs font-semibold text-green-600 mt-0.5">{stat.extra} rate</p>}
               </div>
@@ -143,19 +156,19 @@ export default function CampaignDetails() {
           </div>
           <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-6 border-t border-gray-100 dark:border-dark-600 pt-6">
              <div>
-                <p className="text-xs uppercase tracking-wider text-gray-400 font-bold mb-1.5">Active Sender</p>
+                <p className="text-xs uppercase tracking-widest text-gray-400 font-bold mb-1.5">Active Sender</p>
                 <p className="font-semibold text-gray-700 dark:text-dark-200 bg-gray-50 dark:bg-dark-800 p-2 rounded border border-gray-100 dark:border-dark-700 truncate" title={summary.active_sender}>
                   {summary.active_sender || 'Auto Rotation'}
                 </p>
              </div>
              <div>
-                <p className="text-xs uppercase tracking-wider text-gray-400 font-bold mb-1.5">Subject Line</p>
+                <p className="text-xs uppercase tracking-widest text-gray-400 font-bold mb-1.5">Subject Line</p>
                 <p className="font-semibold text-gray-700 dark:text-dark-200 bg-gray-50 dark:bg-dark-800 p-2 rounded border border-gray-100 dark:border-dark-700 truncate" title={campaign.subject}>
                   {campaign.subject || '—'}
                 </p>
              </div>
              <div>
-                <p className="text-xs uppercase tracking-wider text-gray-400 font-bold mb-1.5">Created Date</p>
+                <p className="text-xs uppercase tracking-widest text-gray-400 font-bold mb-1.5">Created Date</p>
                 <p className="font-semibold text-gray-700 dark:text-dark-200 bg-gray-50 dark:bg-dark-800 p-2 rounded border border-gray-100 dark:border-dark-700">
                   {summary.created_at ? new Date(summary.created_at).toLocaleString() : '—'}
                 </p>

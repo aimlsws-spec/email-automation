@@ -3,6 +3,7 @@ const pool = require('../db');
 const { isValidEmail, parseCSV, parseExcel } = require('../utils/fileParser');
 const { renderSubject, renderTemplate } = require('../utils/templateRenderer');
 const sendingState = require('../utils/sendingState');
+const { recalculateCampaignStats } = require('../services/campaignStats.service');
 
 // POST /api/upload-leads
 async function uploadLeads(req, res) {
@@ -25,6 +26,8 @@ async function uploadLeads(req, res) {
       return res.status(400).json({ error: `Failed to parse file: ${parseErr.message}` });
     }
 
+    console.log(`[UPLOAD] File: ${req.file.originalname} | Ext: ${ext} | Parsed rows: ${rows.length} | First row: ${JSON.stringify(rows[0] ?? null)}`);
+
     // Step 2: Validate + deduplicate within file
     const seen = new Set();
     const valid = [];
@@ -37,6 +40,7 @@ async function uploadLeads(req, res) {
       valid.push(row);
     }
 
+    console.log(`[UPLOAD] Valid: ${valid.length} | Skipped: ${skipped.length} | First skipped: ${JSON.stringify(skipped[0] ?? null)}`);
     if (valid.length === 0) {
       return res.status(400).json({ error: 'No valid leads found in the uploaded file.' });
     }
@@ -117,13 +121,9 @@ async function uploadLeads(req, res) {
     }
     console.log(`[UPLOAD] Leads inserted: ${inserted} | campaign_id: ${campaignId}`);
 
-    // Step 5: Update campaign counts
-    await client.query(
-      `UPDATE campaigns SET total_leads = ?, pending_count = ? WHERE id = ?`,
-      [inserted, inserted, campaignId]
-    );
-
     await client.query('COMMIT');
+    const stats = await recalculateCampaignStats(campaignId, finalSenderEmail);
+    console.log(`[UPLOAD] Campaign stats refreshed: campaign=${campaignId} total=${stats?.total ?? 0} pending=${stats?.pending ?? 0}`);
 
     res.json({
       total: rows.length,

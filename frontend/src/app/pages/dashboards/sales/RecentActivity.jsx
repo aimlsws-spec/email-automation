@@ -39,7 +39,7 @@ export function RecentActivity() {
   return (
     <Card className="col-span-12 flex flex-col rounded-xl shadow-sm md:col-span-1 border border-gray-100 dark:border-dark-700">
       <div className="flex h-14 min-w-0 items-center justify-between px-4 py-3 sm:px-6 border-b border-gray-100 dark:border-dark-800">
-        <h2 className="min-w-0 font-bold tracking-tight text-gray-800 dark:text-dark-100 uppercase text-xs">
+        <h2 className="min-w-0 font-semibold tracking-wide text-gray-800 dark:text-dark-100 uppercase text-xs">
           Recent Activity
         </h2>
         {loading && <div className="size-2 rounded-full bg-primary-500 animate-pulse" />}
@@ -47,7 +47,7 @@ export function RecentActivity() {
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 scrollbar-hide" style={{ maxHeight: "360px" }}>
         {events.length === 0 && !loading ? (
           <div className="flex flex-col items-center justify-center py-12 text-center">
-             <p className="text-xs font-bold text-gray-400 dark:text-dark-400 uppercase tracking-widest">No recent activity</p>
+             <p className="text-xs font-semibold text-gray-400 dark:text-dark-400 uppercase tracking-wide">No recent activity</p>
           </div>
         ) : (
           <Timeline lineSpace="1.25rem">
@@ -60,10 +60,10 @@ export function RecentActivity() {
                 isPing={i === 0 && item.type === 'reply'}
               >
                 <div className="flex flex-col gap-0.5">
-                  <p className="text-xs font-black text-gray-800 dark:text-dark-100 truncate max-w-[180px]">
+                  <p className="text-sm font-medium text-gray-800 dark:text-dark-100 truncate max-w-[180px]">
                     {item.email}
                   </p>
-                  <p className={`text-[9px] font-black uppercase tracking-widest ${
+                  <p className={`text-[11px] font-semibold uppercase tracking-wide ${
                     item.type === 'reply' ? 'text-success' : 
                     item.type === 'failed' ? 'text-error' : 
                     item.type === 'followup' ? 'text-info' : 'text-primary-600'

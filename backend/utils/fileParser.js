@@ -28,9 +28,9 @@ function normalizeRow(row) {
     return '';
   };
   return {
-    email:   get(['email', 'e-mail', 'mail']),
-    name:    get(['name', 'full name', 'fullname', 'lead name']),
-    company: get(['company', 'company name', 'organisation', 'organization']),
+    email:   get(['email', 'e-mail', 'mail', 'email address', 'emailaddress', 'email_address', 'work email', 'business email', 'contact email', 'primary email', 'email id']),
+    name:    get(['name', 'full name', 'fullname', 'lead name', 'first name', 'firstname', 'contact name', 'contact']),
+    company: get(['company', 'company name', 'organisation', 'organization', 'org', 'firm', 'business']),
   };
 }
 
@@ -60,8 +60,25 @@ function parseCSV(buffer) {
 }
 
 function parseExcel(buffer) {
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const bufLen = buffer?.length ?? 0;
+  console.log('[FILEPARSER] Buffer type:', buffer?.constructor?.name, '| Buffer size:', bufLen, 'bytes');
 
+  if (bufLen >= 4) {
+    const isZip = buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04;
+    const magic = [buffer[0], buffer[1], buffer[2], buffer[3]].map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.log('[FILEPARSER] Magic bytes:', magic, isZip ? '(valid XLSX/ZIP)' : '⚠ NOT a valid ZIP — expected 50 4b 03 04');
+  } else {
+    console.log('[FILEPARSER] ⚠ Buffer too small or empty — cannot be a valid XLSX file');
+  }
+
+  // Try buffer read first; fall back to base64 path which handles some edge cases in xlsx@0.18
+  let workbook = XLSX.read(buffer, { type: 'buffer' });
+  if (!workbook.SheetNames.length) {
+    console.log('[FILEPARSER] Primary read returned no sheets — retrying via base64 path');
+    workbook = XLSX.read(buffer.toString('base64'), { type: 'base64' });
+  }
+
+  console.log('[FILEPARSER] Sheet names:', workbook.SheetNames);
   const firstSheet = workbook.SheetNames[0];
   const sheet = workbook.Sheets[firstSheet];
 
@@ -97,10 +114,13 @@ function parseExcel(buffer) {
       return normalizeRow(obj);
     });
 
-  console.log('[FILEPARSER] First mapped row:', mappedRows[0]);
-  console.log('[FILEPARSER] Valid row count:', mappedRows.length);
+  console.log('[FILEPARSER] First mapped row:', JSON.stringify(mappedRows[0] ?? null));
+  console.log('[FILEPARSER] Non-empty rows (pre-email-filter):', mappedRows.length);
 
-  return mappedRows.filter(r => isValidEmail(r.email));
+  const filtered = mappedRows.filter(r => isValidEmail(r.email));
+  console.log('[FILEPARSER] Rows with valid email (post-filter):', filtered.length);
+  return filtered;
 }
+
 
 module.exports = { isValidEmail, normalizeRow, parseCSV, parseExcel };

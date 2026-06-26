@@ -8,9 +8,8 @@ import {
 import {
   ArrowLeftStartOnRectangleIcon,
   ChatBubbleLeftIcon,
-  Cog6ToothIcon,
 } from "@heroicons/react/24/outline";
-import { TbCoins, TbUser, TbUsersGroup } from "react-icons/tb";
+import { TbCoins, TbUsersGroup } from "react-icons/tb";
 import { Link } from "react-router";
 
 // Local Imports
@@ -20,14 +19,6 @@ import { useAuth } from "app/contexts/auth/context";
 // ----------------------------------------------------------------------
 
 const links = [
-  {
-    id: "1",
-    title: "Profile",
-    description: "Your profile Setting",
-    to: "/settings/general",
-    Icon: TbUser,
-    color: "warning",
-  },
   {
     id: "2",
     title: "Messages",
@@ -51,14 +42,6 @@ const links = [
     to: "/settings/billing",
     Icon: TbCoins,
     color: "error",
-  },
-  {
-    id: "5",
-    title: "Settings",
-    description: "Webapp settings",
-    to: "/settings/appearance",
-    Icon: Cog6ToothIcon,
-    color: "success",
   },
 ];
 
@@ -100,25 +83,6 @@ export function Profile() {
         >
           {({ close }) => (
             <>
-              <div className="dark:bg-dark-800 flex items-center gap-4 rounded-t-lg bg-gray-100 px-4 py-5">
-                <Avatar
-                  size={14}
-                  src={user?.Image || "/images/avatar/avatar-12.jpg"}
-                  alt="Profile"
-                />
-                <div>
-                  <Link
-                    className="hover:text-primary-600 focus:text-primary-600 dark:text-dark-100 dark:hover:text-primary-400 dark:focus:text-primary-400 text-base font-medium text-gray-700"
-                    to="/settings/general"
-                  >
-                    {user?.Name || "User"}
-                  </Link>
-
-                  <p className="dark:text-dark-300 mt-0.5 text-xs text-gray-400">
-                    {user?.Role || "User"}
-                  </p>
-                </div>
-              </div>
               <div className="flex flex-col pt-2 pb-5">
                 {links.map((link) => (
                   <Link

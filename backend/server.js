@@ -51,15 +51,15 @@ cron.schedule('0 0 * * *', async () => {
   }
 });
 
-// Domain warm-up daily reset (runs at 00:01 to let midnight reset finish first)
-const { resetDailyCounters } = require('./services/domainWarmup.service');
+// Sender warm-up daily reset (runs at 00:01 to let midnight roll first)
+const { resetDailyCounters } = require('./services/senderWarmup.service');
 const { resetSenderCounts } = require('./services/senderPool.service');
 const { resetDailyDomainStats, getAllDomainStats } = require('./services/eventTracker.service');
 cron.schedule('1 0 * * *', async () => {
   try {
     await Promise.all([resetDailyCounters(), resetSenderCounts(), resetDailyDomainStats()]);
   } catch (err) {
-    console.error('[CRON] Domain warmup/pool reset failed:', err.message);
+    console.error('[CRON] Sender warmup/pool reset failed:', err.message);
   }
 });
 
@@ -91,7 +91,10 @@ const { extractImageUrls, checkImageUrl, validateTemplateImages } = require('./u
 const { delay, withTimeout, nextSendDelayMs, createTrackingId, getTrackingBaseUrl, appendOpenTrackingPixel } = require('./utils/misc');
 
 const app = express();
-app.use(cors());
+const corsOrigin = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
+  : true;
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/email-assets', express.static(path.join(__dirname, 'assets', 'email')));
@@ -208,11 +211,38 @@ cron.schedule('*/10 * * * *', async () => {
   }
 });
 
+// Campaign-linked follow-up queue — runs every 10 minutes
+// Wrapped in try-catch: if the service fails to load for any reason, the
+// remaining route registrations below (including /api/followup-templates)
+// must still execute — they must not be skipped due to an aborted require.
+let runCampaignLinkedFollowUpScheduler = async () => {};
+try {
+  runCampaignLinkedFollowUpScheduler = require('./services/campaignFollowUp.service').runCampaignLinkedFollowUpScheduler;
+} catch (err) {
+  console.error('[CAMPAIGN_FU] Service failed to load — cron disabled:', err.message);
+}
+cron.schedule('*/10 * * * *', async () => {
+  try {
+    await runCampaignLinkedFollowUpScheduler();
+  } catch (err) {
+    console.error('[CAMPAIGN_FU] Cron error:', err.message);
+  }
+});
+
 // (queue routes moved to routes/queue.routes.js)
 app.use(require('./routes/queue.routes'));
 
+// Queue monitoring — read-only stats, sender analytics, paginated listings
+app.use(require('./routes/queueMonitor.routes'));
+
 // (followup routes moved to routes/followup.routes.js)
 app.use(require('./routes/followup.routes'));
+
+// Unsubscribe management API
+app.use(require('./routes/unsubscribe.routes'));
+
+// Reply leads (detected leads from reply tracking)
+app.use(require('./routes/reply_leads.routes'));
 
 // ─── Email Templates CRUD ───────────────────────────────────────────────────
 
@@ -233,6 +263,12 @@ pool.query(`ALTER TABLE campaigns ADD COLUMN template_html TEXT`).catch(() => {}
 // (template routes moved to routes/templates.routes.js)
 app.use(require('./routes/templates.routes'));
 
+// Campaign-linked follow-up templates CRUD
+// Mounted at /api/followup-templates so handler paths are relative (/, /:id)
+console.log('[STARTUP] Registering /api/followup-templates routes…');
+app.use('/api/followup-templates', require('./routes/followupTemplates.routes'));
+console.log('[STARTUP] /api/followup-templates routes registered ✓');
+
 // (followup/analytics and followup/status moved to routes/followup.routes.js)
 
 // (email-logs and send-test-gmail moved to routes/system.routes.js)
@@ -247,13 +283,28 @@ app.use(require('./routes/templates.routes'));
 const multerErrorHandler = require('./middleware/multerErrorHandler');
 app.use(multerErrorHandler);
 
+// Serve the built React frontend for all non-API routes
+const frontendDist = path.join(__dirname, '../frontend/dist');
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+} else {
+  app.get('/', (req, res) => {
+    res.json({ status: 'API running', note: 'Frontend not built — run: cd frontend && npm run build' });
+  });
+}
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Please kill the existing process and try again.`);
+    console.error(`\n❌ Port ${PORT} is already in use.`);
+    console.error(`   Run: npx kill-port ${PORT}   then restart the server.\n`);
   } else {
     console.error("Server failed to start:", err.message);
   }
+  process.exit(1);
 });

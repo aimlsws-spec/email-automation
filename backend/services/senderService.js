@@ -1,6 +1,6 @@
 const pool = require('../db');
 
-const FIXED_DAILY_LIMIT = 500;
+const FIXED_DAILY_LIMIT = 1000;
 const STAGE_DELAY_MAP = { 1: 8000, 2: 5000, 3: 3000, 4: 2000, 5: 1000 };
 
 let migrationDone = false;
@@ -41,6 +41,15 @@ async function ensureSenderColumns() {
   }
 
   await pool.query(`UPDATE sender_accounts SET type = 'gmail' WHERE type IS NULL`).catch(() => {});
+  // Immediately lift sender_accounts.daily_limit to 1000 for all accounts
+  // that were previously set to a lower value (e.g. 500 from an earlier run today).
+  // Uses today's date so it won't over-count sends already recorded.
+  await pool.query(
+    `UPDATE sender_accounts SET daily_limit = ? WHERE daily_limit < ?`,
+    [FIXED_DAILY_LIMIT, FIXED_DAILY_LIMIT]
+  ).catch(e => console.error('[senderService] daily_limit lift error:', e.message));
+  console.log('[senderService] sender_accounts daily_limit lifted to', FIXED_DAILY_LIMIT);
+
   migrationDone = true;
 }
 
@@ -48,6 +57,20 @@ async function checkGlobalLimit() {
   const { rows } = await pool.query('SELECT * FROM system_limits LIMIT 1');
   const limits = rows[0];
   if (!limits) return { allowed: true };
+
+  // Auto-reset when the day rolls over — mirrors resetIfNewDay() for individual senders.
+  // Without this, a stale counter from a missed midnight cron (e.g. server restart)
+  // blocks all sends until the next midnight reset runs.
+  const today = new Date().toISOString().split('T')[0];
+  const lastReset = limits.last_reset_date
+    ? new Date(limits.last_reset_date).toISOString().split('T')[0]
+    : null;
+  if (lastReset !== today) {
+    await pool.query(`UPDATE system_limits SET daily_total_sent = 0, last_reset_date = ?`, [today]);
+    console.log(`[GLOBAL LIMIT] New day detected — reset daily_total_sent to 0 (was ${limits.daily_total_sent})`);
+    return { allowed: true };
+  }
+
   if (limits.daily_total_sent >= limits.daily_global_limit) return { allowed: false, reason: 'GLOBAL LIMIT REACHED' };
   return { allowed: true };
 }

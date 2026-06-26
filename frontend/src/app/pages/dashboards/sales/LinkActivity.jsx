@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
 import { Card, Table, THead, TBody, Th, Tr, Td } from "components/ui";
-import { CursorArrowRaysIcon } from "@heroicons/react/24/outline";
+import { CursorArrowRaysIcon, ChevronLeftIcon, ChevronRightIcon } from "@heroicons/react/24/outline";
+
+const PAGE_SIZE = 10;
+
+function normalizeEmail(raw) {
+  if (!raw) return raw;
+  let s = raw;
+  try { s = decodeURIComponent(s); } catch (e) { void e; }
+  try { s = decodeURIComponent(s); } catch (e) { void e; }
+  return s;
+}
 
 function getReadableLinkName(url) {
   if (!url) return '';
@@ -17,7 +27,6 @@ function getReadableLinkName(url) {
   }
 }
 
-// Returns { date: "04 May 2026", time: "02:42 PM" } or null for invalid/missing
 function formatClickedAt(ts) {
   if (!ts) return null;
   const d = new Date(ts);
@@ -30,6 +39,7 @@ function formatClickedAt(ts) {
 
 export function LinkActivity() {
   const [activity, setActivity] = useState([]);
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
     const load = async () => {
@@ -37,11 +47,11 @@ export function LinkActivity() {
         const res = await fetch("/api/analytics/link-activity");
         const json = await res.json();
         if (json.success) {
-          // Sort by raw timestamp descending (not formatted string)
           const sorted = (json.data || []).sort(
             (a, b) => new Date(b.clicked_at) - new Date(a.clicked_at)
           );
           setActivity(sorted);
+          setPage(1);
         }
       } catch (err) {
         console.error("Failed to load link activity:", err);
@@ -52,35 +62,43 @@ export function LinkActivity() {
     return () => clearInterval(interval);
   }, []);
 
+  const totalPages = Math.max(1, Math.ceil(activity.length / PAGE_SIZE));
+  const visible = activity.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
   return (
-    <Card className="flex flex-col h-full border border-gray-100 dark:border-dark-700 overflow-hidden">
+    <Card className="flex flex-col border border-gray-100 dark:border-dark-700 overflow-hidden">
+      {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100 dark:border-dark-800">
         <CursorArrowRaysIcon className="size-4 text-primary-500" />
-        <h2 className="text-xs font-bold uppercase tracking-widest text-gray-800 dark:text-dark-100">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-800 dark:text-dark-100">
           Link Activity
         </h2>
+        <span className="ml-auto text-xs font-semibold text-gray-400">
+          {activity.length} total
+        </span>
       </div>
 
-      <div className="overflow-y-auto grow">
+      {/* Table */}
+      <div className="overflow-x-auto">
         <Table className="w-full text-left">
-          <THead className="sticky top-0 bg-gray-50 dark:bg-dark-800 z-10">
-            <Tr className="text-[10px] font-black uppercase text-gray-400">
-              <Th className="px-4 py-2">Lead / Campaign</Th>
-              <Th className="px-4 py-2">URL</Th>
-              <Th className="px-4 py-2 text-right">Clicked At</Th>
+          <THead className="sticky top-0 z-10 bg-gray-50 dark:bg-dark-800 border-b border-gray-200 dark:border-dark-600">
+            <Tr className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              <Th className="px-4 py-2.5">Lead / Campaign</Th>
+              <Th className="px-4 py-2.5">URL</Th>
+              <Th className="px-4 py-2.5 text-right">Clicked At</Th>
             </Tr>
           </THead>
           <TBody>
-            {activity.map((item, i) => {
+            {visible.map((item, i) => {
               const ts = formatClickedAt(item.clicked_at);
               return (
                 <Tr key={i} className="border-b border-gray-50 dark:border-dark-800 last:border-0">
                   <Td className="px-4 py-3">
                     <div className="flex flex-col">
-                      <span className="text-[11px] font-bold text-gray-700 dark:text-dark-200 truncate max-w-[120px]" title={item.lead_email}>
-                        {item.lead_email}
+                      <span className="text-sm font-medium text-gray-700 dark:text-dark-200 truncate max-w-[160px]" title={normalizeEmail(item.lead_email)}>
+                        {normalizeEmail(item.lead_email)}
                       </span>
-                      <span className="text-[9px] font-black uppercase text-primary-500/70">
+                      <span className="text-[11px] font-semibold uppercase tracking-wide text-primary-500/70">
                         {item.campaign_name || "N/A"}
                       </span>
                     </div>
@@ -91,7 +109,7 @@ export function LinkActivity() {
                       target="_blank"
                       rel="noopener noreferrer"
                       title={item.url}
-                      className="text-[11px] text-primary-500 hover:underline truncate max-w-[150px] block"
+                      className="text-sm text-primary-500 hover:underline truncate max-w-[180px] block"
                     >
                       {getReadableLinkName(item.url)}
                     </a>
@@ -99,11 +117,11 @@ export function LinkActivity() {
                   <Td className="px-4 py-3 text-right">
                     {ts ? (
                       <div className="flex flex-col items-end">
-                        <span className="text-[11px] font-medium text-gray-600 dark:text-dark-200">{ts.date}</span>
-                        <span className="text-[10px] text-gray-400">{ts.time}</span>
+                        <span className="text-xs font-medium text-gray-600 dark:text-dark-200 tabular-nums">{ts.date}</span>
+                        <span className="text-[11px] text-gray-400 tabular-nums">{ts.time}</span>
                       </div>
                     ) : (
-                      <span className="text-[10px] text-gray-400">N/A</span>
+                      <span className="text-xs text-gray-400">N/A</span>
                     )}
                   </Td>
                 </Tr>
@@ -119,6 +137,29 @@ export function LinkActivity() {
           </TBody>
         </Table>
       </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between px-4 py-2 border-t border-gray-100 dark:border-dark-800">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page === 1}
+            className="flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-primary-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronLeftIcon className="size-3.5" /> Prev
+          </button>
+          <span className="text-xs text-gray-400">
+            Page {page} of {totalPages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={page === totalPages}
+            className="flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-primary-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            Next <ChevronRightIcon className="size-3.5" />
+          </button>
+        </div>
+      )}
     </Card>
   );
 }
