@@ -1,33 +1,69 @@
-# 🔐 Secrets (CRITICAL)
+# -----------------------------
+# Environment & Secrets
+# -----------------------------
 .env
 .env.*
+!.env.example
+
 token.json
 client_secret_*.json
+
 backend/.env
 frontend/.env
 
-# 🐍 Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.sqlite3
-*.log
-venv/
-env/
-
-# 📦 Node / Frontend
+# -----------------------------
+# Node
+# -----------------------------
 node_modules/
 dist/
 build/
 
-# 🧾 OS files
-.DS_Store
-Thumbs.db
+# -----------------------------
+# Runtime Data
+# -----------------------------
+exports/
+logs/
 
-# 🛠 IDE
+# Database dumps
+*.sql
+!migrations/**/*.sql
+
+# CSV exports
+*.csv
+
+# SQLite
+*.sqlite
+*.sqlite3
+
+# -----------------------------
+# Logs
+# -----------------------------
+*.log
+*.out.log
+*.err.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+venv/
+env/
+
+# -----------------------------
+# IDE
+# -----------------------------
 .vscode/
 .idea/
 
-# 📁 Misc
-*.csv
+# -----------------------------
+# OS
+# -----------------------------
+.DS_Store
+Thumbs.db

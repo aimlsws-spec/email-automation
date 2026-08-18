@@ -64,24 +64,28 @@ CREATE TABLE IF NOT EXISTS suppression_list (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─── 5. Enhance leads table for follow-up automation ───────────────────────
-ALTER TABLE leads ADD COLUMN IF NOT EXISTS followup_enabled TINYINT(1) DEFAULT 1;
-ALTER TABLE leads ADD COLUMN IF NOT EXISTS followup_stopped_reason VARCHAR(255);
-ALTER TABLE leads ADD COLUMN IF NOT EXISTS unsubscribed TINYINT(1) DEFAULT 0;
-ALTER TABLE leads ADD COLUMN IF NOT EXISTS unsubscribed_at DATETIME;
+-- Note: no "IF NOT EXISTS" on ADD COLUMN/CREATE INDEX below — MySQL (unlike
+-- MariaDB) rejects that clause with a syntax error. Idempotency instead comes
+-- from migrationRunner.js, which silences duplicate-column (1060) and
+-- duplicate-key (1061) errors.
+ALTER TABLE leads ADD COLUMN followup_enabled TINYINT(1) DEFAULT 1;
+ALTER TABLE leads ADD COLUMN followup_stopped_reason VARCHAR(255);
+ALTER TABLE leads ADD COLUMN unsubscribed TINYINT(1) DEFAULT 0;
+ALTER TABLE leads ADD COLUMN unsubscribed_at DATETIME;
 
 -- ─── 6. Enhance campaigns table for follow-up settings ─────────────────────
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS followup_enabled TINYINT(1) DEFAULT 1;
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS initial_template_id INT;
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS followup_template_1_id INT;
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS followup_template_2_id INT;
+ALTER TABLE campaigns ADD COLUMN followup_enabled TINYINT(1) DEFAULT 1;
+ALTER TABLE campaigns ADD COLUMN initial_template_id INT;
+ALTER TABLE campaigns ADD COLUMN followup_template_1_id INT;
+ALTER TABLE campaigns ADD COLUMN followup_template_2_id INT;
 
 -- ─── 7. Insert default follow-up templates ─────────────────────────────────
 -- These will be populated by the backend service on first run
 
 -- ─── 8. Create indexes for performance ─────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_leads_followup_enabled ON leads(followup_enabled);
-CREATE INDEX IF NOT EXISTS idx_leads_unsubscribed ON leads(unsubscribed);
-CREATE INDEX IF NOT EXISTS idx_campaigns_followup_enabled ON campaigns(followup_enabled);
+CREATE INDEX idx_leads_followup_enabled ON leads(followup_enabled);
+CREATE INDEX idx_leads_unsubscribed ON leads(unsubscribed);
+CREATE INDEX idx_campaigns_followup_enabled ON campaigns(followup_enabled);
 
 -- ─── 9. Backfill existing data ─────────────────────────────────────────────
 -- Mark leads with replies as followup_stopped
