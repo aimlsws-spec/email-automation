@@ -9,6 +9,7 @@ import { SidebarToggleBtn } from "components/shared/SidebarToggleBtn";
 import { useBreakpointsContext } from "app/contexts/breakpoint/context";
 import { Search } from "components/template/Search";
 import { useThemeContext } from "app/contexts/theme/context";
+import { UserMenu } from "components/shared/UserMenu";
 
 // ----------------------------------------------------------------------
 
@@ -27,7 +28,7 @@ export function Header() {
         <SidebarToggleBtn />
       </div>
 
-      <div className="flex items-center gap-2 sm:flex-1">
+      <div className="flex flex-1 items-center gap-2">
         <div className="flex-1">
           <Search
             renderButton={(open) => (
@@ -72,6 +73,7 @@ export function Header() {
             )}
           />
         </div>
+        <UserMenu />
       </div>
     </header>
   );

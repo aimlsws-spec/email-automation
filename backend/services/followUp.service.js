@@ -4,6 +4,7 @@ const pool = require('../db');
 const { sendEmail } = require('./emailService');
 const { canSendEmail, incrementSenderCount, domainFromEmail } = require('./senderWarmup.service');
 const { getAutomationEnabled } = require('./systemSettings.service');
+const { normalizedStatus, isCampaignFollowUpPaused, logFollowUpCheck } = require('../utils/followUpHelpers');
 
 // Delegate to the new automated follow-up service for the 30-day sequence
 const automatedFollowUp = require('./automatedFollowUp.service');
@@ -66,25 +67,7 @@ function shouldSendFollowUp(lead) {
   return new Date() >= new Date(lead.next_follow_up_at);
 }
 
-function normalizedStatus(value) {
-  return String(value || '').trim().toLowerCase();
-}
 
-function isCampaignPaused(lead) {
-  if (lead.campaign_followup_enabled === 0 || lead.campaign_followup_enabled === false) return true;
-  return ['paused', 'archived', 'stopped', 'cancelled', 'canceled'].includes(normalizedStatus(lead.campaign_status));
-}
-
-function logFollowUpCheck(lead, automationEnabled, isSelected) {
-  const followupStatus = lead.campaign_followup_enabled === 0 || lead.campaign_followup_enabled === false
-    ? 'paused'
-    : normalizedStatus(lead.campaign_status) || 'active';
-
-  console.log(
-    `[FOLLOWUP_CHECK] campaign_id=${lead.campaign_id || ''} campaign_name=${JSON.stringify(lead.campaign_name || '')} ` +
-    `automation_status=${automationEnabled ? 'active' : 'paused'} followup_status=${followupStatus} is_selected=${isSelected}`
-  );
-}
 
 function getFollowUpTemplate(step, lead) {
   const html = fs.existsSync(TEMPLATE_PATH)
@@ -109,9 +92,17 @@ function getFollowUpSubject(step, lead) {
     .trim();
 }
 
-async function scheduleNextFollowUp(leadEmail, step, messageId, threadId) {
+async function scheduleNextFollowUp(leadEmail, step, messageId, threadId, campaignId = null) {
   const nextStep = step + 1;
   const nextAt = nextStep <= MAX_FOLLOW_UP_STEP ? calculateNextFollowUp(step, new Date()) : null;
+
+  const whereClause = campaignId
+    ? `WHERE email = ? AND campaign_id = ?`
+    : `WHERE email = ?`;
+  const params = campaignId
+    ? [nextStep, nextAt, messageId || '', messageId || '', threadId || '', threadId || '', leadEmail, campaignId]
+    : [nextStep, nextAt, messageId || '', messageId || '', threadId || '', threadId || '', leadEmail];
+
   await pool.query(
     `UPDATE leads
      SET follow_up_step    = ?,
@@ -119,8 +110,8 @@ async function scheduleNextFollowUp(leadEmail, step, messageId, threadId) {
          next_follow_up_at = ?,
          message_id        = CASE WHEN ? != '' THEN ? ELSE message_id END,
          thread_id         = CASE WHEN ? != '' THEN ? ELSE thread_id END
-     WHERE email = ?`,
-    [nextStep, nextAt, messageId || '', messageId || '', threadId || '', threadId || '', leadEmail]
+     ${whereClause}`,
+    params
   );
 }
 
@@ -188,7 +179,7 @@ async function runFollowUpScheduler() {
       const latestLeadState = { ...lead, ...(latestCampaignRows[0] || {}) };
       const latestAutomationEnabled = await getAutomationEnabled();
       logFollowUpCheck(latestLeadState, latestAutomationEnabled, false);
-      if (!latestAutomationEnabled || isCampaignPaused(latestLeadState)) {
+      if (!latestAutomationEnabled || isCampaignFollowUpPaused(latestLeadState)) {
         console.log(`[FOLLOWUP_SKIP] campaign_id=${lead.campaign_id || ''} reason=paused`);
         continue;
       }
@@ -214,12 +205,12 @@ async function runFollowUpScheduler() {
       });
 
       await incrementSenderCount(senderEmail);
-      await scheduleNextFollowUp(lead.email, step, result.messageId, result.threadId);
+      await scheduleNextFollowUp(lead.email, step, result.messageId, result.threadId, lead.campaign_id);
 
       const legacyStatus = `Follow-up ${step}`;
       await pool.query(
-        `UPDATE leads SET status = ?, follow_up_count = ?, last_sent_date = NOW(), last_activity_at = NOW() WHERE email = ?`,
-        [legacyStatus, step, lead.email]
+        `UPDATE leads SET status = ?, follow_up_count = ?, last_sent_date = NOW(), last_activity_at = NOW() WHERE email = ? AND campaign_id = ?`,
+        [legacyStatus, step, lead.email, lead.campaign_id]
       );
 
       await pool.query(

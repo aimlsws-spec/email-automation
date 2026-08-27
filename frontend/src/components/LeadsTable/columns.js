@@ -2,10 +2,6 @@
 import { createColumnHelper } from "@tanstack/react-table";
 
 // Local Imports
-import {
-    SelectCell,
-    SelectHeader,
-} from "components/shared/table/SelectCheckbox";
 import { RowActions } from "./RowActions";
 import { 
     NameCell, 
@@ -23,11 +19,6 @@ import {
 const columnHelper = createColumnHelper();
 
 export const columns = [
-    columnHelper.display({
-        id: "select",
-        header: SelectHeader,
-        cell: SelectCell,
-    }),
     columnHelper.accessor("campaign_name", {
         header: "Campaign Name",
         cell: CampaignCell,

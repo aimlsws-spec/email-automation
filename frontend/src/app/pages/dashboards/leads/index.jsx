@@ -12,6 +12,8 @@ import {
   CheckCircleIcon,
   ArrowPathIcon,
 } from "@heroicons/react/24/outline";
+import { getJSON, getHeaders } from "services/api";
+import { fetchCampaigns } from "services/api";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -193,9 +195,8 @@ export default function LeadsPage() {
 
   // Load stats
   const loadStats = useCallback(() => {
-    fetch("/api/reply-leads/stats")
-      .then((r) => r.json())
-      .then((d) => { if (d.success) setStats(d); })
+    getJSON("/api/reply-leads/stats")
+      .then((d) => { if (d?.success) setStats(d); })
       .catch(() => {});
   }, []);
 
@@ -203,13 +204,9 @@ export default function LeadsPage() {
 
   // Load campaigns for filter dropdown
   useEffect(() => {
-    fetch("/api/campaigns")
-      .then((r) => r.json())
-      .then((d) => {
-        const list = Array.isArray(d) ? d : d?.campaigns ?? [];
-        setCampaigns(list);
-      })
-      .catch(() => {});
+    fetchCampaigns().then((list) => {
+      setCampaigns(Array.isArray(list) ? list : []);
+    }).catch(() => {});
   }, []);
 
   // Load leads
@@ -223,9 +220,8 @@ export default function LeadsPage() {
       if (currentCampaign) params.set("campaign",  currentCampaign);
       if (currentStatus)   params.set("status",    currentStatus);
 
-      const res  = await fetch(`/api/reply-leads?${params}`);
-      const data = await res.json();
-      if (data.success) {
+      const data = await getJSON(`/api/reply-leads?${params}`);
+      if (data?.success) {
         setLeads(data.rows ?? []);
         setTotalPages(data.totalPages ?? 1);
         setTotal(data.total ?? 0);
@@ -285,7 +281,7 @@ export default function LeadsPage() {
       if (campaignFilter) params.set("campaign",  campaignFilter);
       if (statusFilter)   params.set("status",    statusFilter);
 
-      const res  = await fetch(`/api/reply-leads/export?${params}`);
+      const res  = await fetch(`/api/reply-leads/export?${params}`, { headers: getHeaders() });
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();
       const url  = URL.createObjectURL(blob);
@@ -307,7 +303,7 @@ export default function LeadsPage() {
     try {
       await fetch(`/api/reply-leads/${id}/status`, {
         method:  "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: getHeaders(),
         body:    JSON.stringify({ status }),
       });
       setLeads((prev) =>

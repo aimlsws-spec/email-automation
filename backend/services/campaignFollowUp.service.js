@@ -19,10 +19,12 @@ const { canSendEmail, incrementSenderCount } = require('./senderWarmup.service')
 const { generatePlainText } = require('../utils/plainText');
 const { isUnsubscribed } = require('./unsubscribe.service');
 const { getAutomationEnabled } = require('./systemSettings.service');
+const { isCampaignFollowUpPaused, logFollowUpCheck } = require('../utils/followUpHelpers');
 
 // ─── Schema (idempotent) ─────────────────────────────────────────────────────
 
 let schemaMigrated = false;
+let legacyCampaignTemplateColumnExists = null;
 
 async function ensureSchema() {
   if (schemaMigrated) return;
@@ -65,6 +67,11 @@ async function ensureSchema() {
     // Column on campaigns so queueWorker can look up the linked template id
     `ALTER TABLE campaigns ADD COLUMN initial_template_id INT DEFAULT NULL`,
     `ALTER TABLE campaigns ADD COLUMN followup_enabled TINYINT(1) DEFAULT 1`,
+
+    // Metadata on email_queue lets manual follow-up jobs remain idempotent per stage.
+    `ALTER TABLE email_queue ADD COLUMN campaign_template_id INT DEFAULT NULL`,
+    `ALTER TABLE email_queue ADD COLUMN followup_template_id INT DEFAULT NULL`,
+    `ALTER TABLE email_queue ADD COLUMN followup_stage INT DEFAULT NULL`,
   ];
 
   for (const sql of stmts) {
@@ -85,34 +92,19 @@ function calcScheduledAt(initialSentAt, delayValue, delayUnit) {
   return new Date(base.getTime() + ms);
 }
 
-function normalizedStatus(value) {
-  return String(value || '').trim().toLowerCase();
+function getNextStageTemplate(templates, currentStage) {
+  const numericStage = Number(currentStage || 0);
+  return [...(templates || [])]
+    .filter(tpl => Number(tpl.followup_stage) > numericStage)
+    .sort((a, b) => Number(a.followup_stage) - Number(b.followup_stage))[0] || null;
 }
 
 function isFollowUpPaused(campaign) {
   if (!campaign) return { paused: true, reason: 'campaign_missing' };
-  if (campaign.followup_enabled === 0 || campaign.followup_enabled === false) {
+  if (isCampaignFollowUpPaused(campaign)) {
     return { paused: true, reason: 'paused' };
   }
-
-  const status = normalizedStatus(campaign.status);
-  if (['paused', 'archived', 'stopped', 'cancelled', 'canceled'].includes(status)) {
-    return { paused: true, reason: 'paused' };
-  }
-
   return { paused: false, reason: null };
-}
-
-function logFollowUpCheck(campaign, automationEnabled, isSelected) {
-  const automationStatus = automationEnabled ? 'active' : 'paused';
-  const followupStatus = campaign?.followup_enabled === 0 || campaign?.followup_enabled === false
-    ? 'paused'
-    : normalizedStatus(campaign?.status) || 'active';
-
-  console.log(
-    `[FOLLOWUP_CHECK] campaign_id=${campaign?.id || ''} campaign_name=${JSON.stringify(campaign?.name || '')} ` +
-    `automation_status=${automationStatus} followup_status=${followupStatus} is_selected=${isSelected}`
-  );
 }
 
 async function getCampaignState(campaignId) {
@@ -123,14 +115,60 @@ async function getCampaignState(campaignId) {
   return rows[0] || null;
 }
 
+async function columnExists(tableName, columnName) {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*) AS count
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?`,
+    [tableName, columnName]
+  );
+  return Number(rows[0]?.count || 0) > 0;
+}
+
+async function hasLegacyCampaignTemplateColumn() {
+  if (legacyCampaignTemplateColumnExists === null) {
+    legacyCampaignTemplateColumnExists = await columnExists('campaigns', 'campaign_template_id');
+  }
+  return legacyCampaignTemplateColumnExists;
+}
+
+async function getCampaignTemplateContext(campaignId, userId) {
+  await ensureSchema();
+
+  const legacyColumn = await hasLegacyCampaignTemplateColumn();
+  const userFilter = userId ? ' AND user_id = ?' : '';
+  const params = userId ? [campaignId, userId] : [campaignId];
+  const legacySelect = legacyColumn ? ', campaign_template_id' : '';
+
+  const { rows } = await pool.query(
+    `SELECT id, name, status, followup_enabled, initial_template_id${legacySelect}
+     FROM campaigns
+     WHERE id = ?${userFilter}
+     LIMIT 1`,
+    params
+  );
+
+  const campaign = rows[0] || null;
+  if (!campaign) return { campaign: null, campaignTemplateId: null, usedLegacyColumn: false };
+
+  const campaignTemplateId = campaign.initial_template_id || (legacyColumn ? campaign.campaign_template_id : null) || null;
+  return {
+    campaign,
+    campaignTemplateId,
+    usedLegacyColumn: Boolean(!campaign.initial_template_id && legacyColumn && campaign.campaign_template_id),
+  };
+}
+
 async function canProcessCampaignFollowUps(campaignId, isSelected) {
   const automationEnabled = await getAutomationEnabled();
   const campaign = await getCampaignState(campaignId);
   logFollowUpCheck(campaign || { id: campaignId, name: '', status: null, followup_enabled: null }, automationEnabled, isSelected);
 
-  if (!automationEnabled) {
-    console.log(`[FOLLOWUP_SKIP] campaign_id=${campaignId} reason=paused`);
-    return { ok: false, reason: 'paused', campaign };
+  if (!campaign) {
+    console.log(`[FOLLOWUP_SKIP] campaign_id=${campaignId} reason=campaign_missing`);
+    return { ok: false, reason: 'campaign_missing', campaign };
   }
 
   const paused = isFollowUpPaused(campaign);
@@ -146,7 +184,8 @@ async function canProcessCampaignFollowUps(campaignId, isSelected) {
 
 /**
  * Called by queueWorker after a successful initial email send.
- * Creates one followup_queue row per configured follow-up stage.
+ * Creates the first pending followup_queue row. Later stages are created only
+ * after the previous stage is actually sent.
  */
 async function scheduleLinkedFollowUps(leadEmail, campaignId, campaignTemplateId, initialSentAt) {
   await ensureSchema();
@@ -154,26 +193,55 @@ async function scheduleLinkedFollowUps(leadEmail, campaignId, campaignTemplateId
   const campaignCheck = await canProcessCampaignFollowUps(campaignId, false);
   if (!campaignCheck.ok) return;
 
-  const { rows: templates } = await pool.query(
-    `SELECT * FROM followup_templates
-     WHERE campaign_template_id = ?
-     ORDER BY followup_stage ASC`,
-    [campaignTemplateId]
+  const templates = await getCampaignFollowUpTemplates(campaignTemplateId);
+  const templateCount = Array.isArray(templates) ? templates.length : 0;
+
+  console.log(
+    `[FOLLOWUP_CHECK] Campaign ID=${campaignId} Campaign Template ID=${campaignTemplateId} Linked Templates Found=${templateCount}`
   );
 
-  if (templates.length === 0) return;
-
-  for (const tpl of templates) {
-    const scheduledAt = calcScheduledAt(initialSentAt || new Date(), tpl.delay_value, tpl.delay_unit);
-    await pool.query(
-      `INSERT IGNORE INTO followup_queue
-         (lead_email, campaign_id, campaign_template_id, followup_template_id, followup_stage, scheduled_at, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-      [leadEmail, campaignId, campaignTemplateId, tpl.id, tpl.followup_stage, scheduledAt]
+  if (templateCount === 0) {
+    console.log(
+      `[FOLLOWUP_SKIP] Campaign ID=${campaignId} Campaign Template ID=${campaignTemplateId} Reason=No linked follow-up templates configured. Queue Creation: Skipped`
     );
+    return;
   }
 
-  console.log(`[CAMPAIGN_FU] Scheduled ${templates.length} linked follow-up(s) for ${leadEmail}`);
+  const validTemplates = templates.filter(tpl => tpl && tpl.id && Number.isFinite(Number(tpl.followup_stage)));
+  if (validTemplates.length === 0) {
+    console.log(
+      `[FOLLOWUP_SKIP] Campaign ID=${campaignId} Campaign Template ID=${campaignTemplateId} Reason=No valid linked follow-up templates found. Queue Creation: Skipped`
+    );
+    return;
+  }
+
+  const firstTemplate = validTemplates.sort((a, b) => Number(a.followup_stage) - Number(b.followup_stage))[0];
+  const scheduledAt = calcScheduledAt(initialSentAt || new Date(), firstTemplate.delay_value, firstTemplate.delay_unit);
+
+  try {
+    await pool.query(
+      `INSERT INTO followup_queue
+         (lead_email, campaign_id, campaign_template_id, followup_template_id, followup_stage, scheduled_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending')
+       ON DUPLICATE KEY UPDATE
+         campaign_template_id = VALUES(campaign_template_id),
+         followup_template_id = VALUES(followup_template_id),
+         scheduled_at         = VALUES(scheduled_at),
+         status               = 'pending',
+         stopped_reason       = NULL,
+         sent_at              = NULL`,
+      [leadEmail, campaignId, campaignTemplateId, firstTemplate.id, firstTemplate.followup_stage, scheduledAt]
+    );
+    console.log(
+      `[FOLLOWUP_CREATE] Templates Found=${templateCount} Campaign ID=${campaignId} Lead=${leadEmail} Stage=${firstTemplate.followup_stage} ScheduledAt=${scheduledAt.toISOString()} TemplateId=${firstTemplate.id}`
+    );
+  } catch (err) {
+    console.warn(`[FOLLOWUP_CREATE] Failed to insert followup_queue for ${leadEmail} stage=${firstTemplate.followup_stage}:`, err.message);
+  }
+
+  console.log(
+    `[FOLLOWUP_CREATE] Campaign ID=${campaignId} Campaign Template ID=${campaignTemplateId} Templates Found=${templateCount} Next Pending Stage=${firstTemplate.followup_stage}`
+  );
 }
 
 // ─── Stop all pending follow-ups for a lead+campaign ────────────────────────
@@ -187,6 +255,223 @@ async function stopLinkedFollowUps(leadEmail, campaignId, reason) {
   ).catch(() => ({ rowsAffected: 0 }));
   if (rowsAffected > 0) {
     console.log(`[CAMPAIGN_FU] Stopped ${rowsAffected} pending follow-up(s) for ${leadEmail} — ${reason}`);
+  }
+}
+
+async function getCampaignFollowUpTemplate(campaignTemplateId, stage) {
+  if (!campaignTemplateId) return null;
+  const { rows } = await pool.query(
+    `SELECT ft.*, et.name AS campaign_template_name
+     FROM followup_templates ft
+     LEFT JOIN email_templates et ON et.id = ft.campaign_template_id
+     WHERE ft.campaign_template_id = ? AND ft.followup_stage = ?
+     LIMIT 1`,
+    [campaignTemplateId, stage]
+  );
+  return rows[0] || null;
+}
+
+async function getCampaignFollowUpTemplates(campaignTemplateId) {
+  if (!campaignTemplateId) return [];
+  const { rows } = await pool.query(
+    `SELECT ft.*, et.name AS campaign_template_name
+     FROM followup_templates ft
+     JOIN email_templates et ON et.id = ft.campaign_template_id
+     WHERE ft.campaign_template_id = ?
+     ORDER BY ft.followup_stage ASC`,
+    [campaignTemplateId]
+  );
+  return rows;
+}
+
+async function getCampaignFollowUpTemplatesForCampaign(campaignId, userId) {
+  const context = await getCampaignTemplateContext(campaignId, userId);
+  if (!context.campaign || !context.campaignTemplateId) {
+    return { ...context, templates: [] };
+  }
+
+  const templates = await getCampaignFollowUpTemplates(context.campaignTemplateId);
+  const validTemplates = templates
+    .filter(tpl => tpl && tpl.id && Number.isFinite(Number(tpl.followup_stage)))
+    .sort((a, b) => Number(a.followup_stage) - Number(b.followup_stage));
+
+  return { ...context, templates: validTemplates };
+}
+
+async function getCampaignFollowUpTemplateForCampaign(campaignId, stage, userId) {
+  const context = await getCampaignFollowUpTemplatesForCampaign(campaignId, userId);
+  const numericStage = Number(stage);
+  const template = context.templates.find(tpl => Number(tpl.followup_stage) === numericStage) || null;
+  return { ...context, template };
+}
+
+async function syncFollowUpQueueAfterSend({
+  leadEmail,
+  campaignId,
+  campaignTemplateId,
+  followupTemplateId,
+  followupStage,
+  queueId,
+  queueJobId,
+  messageId,
+  threadId,
+  subject,
+  senderEmail,
+}) {
+  await ensureSchema();
+
+  const sentStage = Number(followupStage || 0);
+  if (!leadEmail || !campaignId || !campaignTemplateId || !sentStage) {
+    throw new Error('Missing follow-up synchronization context');
+  }
+
+  const templates = await getCampaignFollowUpTemplates(campaignTemplateId);
+  const nextTemplate = getNextStageTemplate(templates, sentStage);
+  const nextScheduledAt = nextTemplate
+    ? calcScheduledAt(new Date(), nextTemplate.delay_value, nextTemplate.delay_unit)
+    : null;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: leadRows } = await client.query(
+      `SELECT email, follow_up_step, follow_up_count, has_replied, is_bounced, unsubscribed
+       FROM leads
+       WHERE email = ? AND campaign_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [leadEmail, campaignId]
+    );
+    const lead = leadRows[0] || null;
+
+    if (!lead) {
+      throw new Error(`Lead not found for follow-up sync: ${leadEmail}`);
+    }
+
+    if (lead.has_replied || lead.is_bounced || lead.unsubscribed) {
+      if (queueJobId) {
+        await client.query(
+          `UPDATE email_queue
+           SET status = 'sent', last_error = NULL, updated_at = NOW()
+           WHERE id = ?`,
+          [queueJobId]
+        );
+      }
+      await client.query(
+        `UPDATE followup_queue
+         SET status = 'stopped',
+             stopped_reason = ?,
+             sent_at = COALESCE(sent_at, NOW())
+         WHERE lead_email = ? AND campaign_id = ? AND status = 'pending'`,
+        [lead.has_replied ? 'reply_received' : lead.is_bounced ? 'bounced' : 'unsubscribed', leadEmail, campaignId]
+      );
+      await client.query(
+        `UPDATE leads
+         SET followup_enabled = 0,
+             followup_stopped_reason = ?,
+             next_follow_up_at = NULL,
+             last_activity_at = NOW()
+         WHERE email = ? AND campaign_id = ?`,
+        [lead.has_replied ? 'replied' : lead.is_bounced ? 'bounced' : 'unsubscribed', leadEmail, campaignId]
+      );
+      await client.query('COMMIT');
+      return { completedStage: sentStage, nextStage: null, stopped: true };
+    }
+
+    if (queueId) {
+      await client.query(
+        `UPDATE followup_queue
+         SET status = 'sent', sent_at = NOW(), stopped_reason = NULL
+         WHERE id = ? AND lead_email = ? AND campaign_id = ?`,
+        [queueId, leadEmail, campaignId]
+      );
+    }
+
+    if (queueJobId) {
+      await client.query(
+        `UPDATE email_queue
+         SET status = 'sent', last_error = NULL, updated_at = NOW()
+         WHERE id = ?`,
+        [queueJobId]
+      );
+    }
+
+    await client.query(
+      `UPDATE followup_queue
+       SET status = 'sent', sent_at = COALESCE(sent_at, NOW()), stopped_reason = NULL
+       WHERE lead_email = ? AND campaign_id = ? AND followup_stage = ? AND status = 'pending'`,
+      [leadEmail, campaignId, sentStage]
+    );
+
+    await client.query(
+      `UPDATE followup_queue
+       SET status = 'stopped', stopped_reason = 'superseded_by_manual_send'
+       WHERE lead_email = ? AND campaign_id = ? AND status = 'pending'`,
+      [leadEmail, campaignId]
+    );
+
+    await client.query(
+      `UPDATE leads
+       SET follow_up_step = GREATEST(COALESCE(follow_up_step, 0), ?),
+           follow_up_count = CASE
+             WHEN COALESCE(follow_up_step, 0) < ? THEN COALESCE(follow_up_count, 0) + 1
+             ELSE COALESCE(follow_up_count, 0)
+           END,
+           status = ?,
+           message_id = COALESCE(NULLIF(?, ''), message_id),
+           thread_id = COALESCE(NULLIF(?, ''), thread_id),
+           last_sent_date = NOW(),
+           last_sent_at = NOW(),
+           last_activity_at = NOW(),
+           last_subject = COALESCE(NULLIF(?, ''), last_subject),
+           sender_email = COALESCE(NULLIF(?, ''), sender_email),
+           next_follow_up_at = ?
+       WHERE email = ? AND campaign_id = ?`,
+      [
+        sentStage,
+        sentStage,
+        `Follow-up ${sentStage}`,
+        messageId || '',
+        threadId || '',
+        subject || '',
+        senderEmail || '',
+        nextScheduledAt,
+        leadEmail,
+        campaignId,
+      ]
+    );
+
+    if (nextTemplate) {
+      await client.query(
+        `INSERT INTO followup_queue
+           (lead_email, campaign_id, campaign_template_id, followup_template_id, followup_stage, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending')
+         ON DUPLICATE KEY UPDATE
+           campaign_template_id = VALUES(campaign_template_id),
+           followup_template_id = VALUES(followup_template_id),
+           scheduled_at         = VALUES(scheduled_at),
+           status               = 'pending',
+           stopped_reason       = NULL,
+           sent_at              = NULL`,
+        [leadEmail, campaignId, campaignTemplateId, nextTemplate.id, nextTemplate.followup_stage, nextScheduledAt]
+      );
+    }
+
+    await client.query('COMMIT');
+    return {
+      completedStage: sentStage,
+      completedTemplateId: followupTemplateId || null,
+      nextStage: nextTemplate ? Number(nextTemplate.followup_stage) : null,
+      nextTemplateId: nextTemplate ? nextTemplate.id : null,
+      nextScheduledAt,
+      stopped: false,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -348,25 +633,22 @@ async function runCampaignLinkedFollowUpScheduler() {
           lead:          leadData,
         });
 
-        // ── Mark queue row as sent ───────────────────────────────────────────
-        await pool.query(
-          `UPDATE followup_queue SET status = 'sent', sent_at = NOW() WHERE id = ?`,
-          [rec.id]
+        const syncResult = await syncFollowUpQueueAfterSend({
+          leadEmail: rec.lead_email,
+          campaignId: rec.campaign_id,
+          campaignTemplateId: rec.campaign_template_id,
+          followupTemplateId: rec.followup_template_id,
+          followupStage: rec.followup_stage,
+          queueId: rec.id,
+          messageId: result.messageId,
+          threadId: result.threadId,
+          subject: emailSubject,
+          senderEmail,
+        });
+        console.log(
+          `[FOLLOWUP_SYNC] auto lead=${rec.lead_email} campaign=${rec.campaign_id} ` +
+          `completedStage=${syncResult.completedStage} nextStage=${syncResult.nextStage || 'none'}`
         );
-
-        // ── Update lead thread info for continued threading ──────────────────
-        if (result.messageId) {
-          await pool.query(
-            `UPDATE leads
-             SET message_id       = ?,
-                 thread_id        = COALESCE(NULLIF(?, ''), thread_id),
-                 last_sent_at     = NOW(),
-                 last_activity_at = NOW(),
-                 last_subject     = ?
-             WHERE email = ? AND campaign_id = ?`,
-            [result.messageId, result.threadId || '', emailSubject, rec.lead_email, rec.campaign_id]
-          );
-        }
 
         await incrementSenderCount(senderEmail).catch(() => {});
         sent++;
@@ -401,4 +683,10 @@ module.exports = {
   scheduleLinkedFollowUps,
   stopLinkedFollowUps,
   runCampaignLinkedFollowUpScheduler,
+  getCampaignFollowUpTemplate,
+  getCampaignFollowUpTemplates,
+  getCampaignFollowUpTemplatesForCampaign,
+  getCampaignFollowUpTemplateForCampaign,
+  syncFollowUpQueueAfterSend,
+  calcScheduledAt,
 };

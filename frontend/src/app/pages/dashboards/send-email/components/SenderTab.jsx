@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { CheckCircleIcon, UserPlusIcon } from "@heroicons/react/24/outline";
 import { Card, Button } from "components/ui";
+import { getHeaders } from "services/api";
 
 // ----------------------------------------------------------------------
 
@@ -71,7 +72,7 @@ export function SenderTab({
     try {
       const res = await fetch("/api/senders", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getHeaders(),
         body: JSON.stringify({ email, type: "smtp", smtp_host, smtp_port, smtp_user, smtp_pass }),
       });
       const data = await res.json();

@@ -1,7 +1,7 @@
 import DashboardsIcon from 'assets/dualicons/dashboards.svg?react'
 import StatisticIcon from 'assets/nav-icons/statistic.svg?react'
 import MailIcon from 'assets/nav-icons/megaphone.svg?react'
-import { UserGroupIcon, QueueListIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
+import { UserGroupIcon, QueueListIcon, ArrowPathIcon, NoSymbolIcon, BoltIcon } from '@heroicons/react/24/outline'
 import { NAV_TYPE_ROOT, NAV_TYPE_ITEM } from 'constants/app.constant'
 
 const ROOT_DASHBOARDS = '/dashboards'
@@ -33,6 +33,13 @@ export const dashboards = {
             Icon: MailIcon,
         },
         {
+            id: 'dashboards.auto-campaigns',
+            path: path(ROOT_DASHBOARDS, '/auto-campaigns'),
+            type: NAV_TYPE_ITEM,
+            title: 'Auto-Pilot Campaigns',
+            Icon: BoltIcon,
+        },
+        {
             id: 'dashboards.leads',
             path: path(ROOT_DASHBOARDS, '/leads'),
             type: NAV_TYPE_ITEM,
@@ -55,6 +62,13 @@ export const dashboards = {
             title: 'Follow-up Queue',
             transKey: 'nav.dashboards.followup-queue',
             Icon: ArrowPathIcon,
+        },
+        {
+            id: 'dashboards.suppressions',
+            path: path(ROOT_DASHBOARDS, '/suppressions'),
+            type: NAV_TYPE_ITEM,
+            title: 'Email Suppression',
+            Icon: NoSymbolIcon,
         },
     ]
 }

@@ -73,7 +73,9 @@ function usePreviewSafeImages(html) {
 }
 
 function renderTemplate(lead) {
-  const html = fs.readFileSync(TEMPLATE_PATH, 'utf8');
+  const html = fs.existsSync(TEMPLATE_PATH)
+    ? fs.readFileSync(TEMPLATE_PATH, 'utf8')
+    : `<p>Hi {{customerName}},</p><p>Just a quick note to follow up.</p><p>Thanks,<br>{{agentName}}</p>`;
   const trustLine = [
     '<p style="font-size: 12px; line-height: 1.6; color: #333333; margin: 0 0 18px;">',
     'You are receiving this email because we found your business contact information publicly available and believe our IT services may be relevant to your company.',

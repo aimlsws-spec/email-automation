@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, Table, THead, TBody, Th, Tr, Td } from "components/ui";
 import { CursorArrowRaysIcon, ChevronLeftIcon, ChevronRightIcon } from "@heroicons/react/24/outline";
+import { getJSON } from "services/api";
 
 const PAGE_SIZE = 10;
 
@@ -44,9 +45,8 @@ export function LinkActivity() {
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch("/api/analytics/link-activity");
-        const json = await res.json();
-        if (json.success) {
+        const json = await getJSON("/api/analytics/link-activity");
+        if (json?.success) {
           const sorted = (json.data || []).sort(
             (a, b) => new Date(b.clicked_at) - new Date(a.clicked_at)
           );

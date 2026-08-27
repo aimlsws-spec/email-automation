@@ -1,8 +1,16 @@
 const BASE = '/api';
 
-async function getJSON(url) {
+export function getHeaders(includeContentType = true) {
+  const token = localStorage.getItem('authToken');
+  const headers = {};
+  if (includeContentType) headers['Content-Type'] = 'application/json';
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+export async function getJSON(url) {
   try {
-    const res = await fetch(url, { cache: 'no-store' });
+    const res = await fetch(url, { cache: 'no-store', headers: getHeaders() });
     
     if (!res.ok) {
       console.error(`API error: ${res.status} on ${url}`);
@@ -120,7 +128,7 @@ export async function fetchCampaign(id) {
 export async function deleteQueueItems(ids) {
   const res = await fetch(`${BASE}/queue/items`, {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ ids }),
   });
   return res.json();
@@ -130,7 +138,7 @@ export async function deleteFollowupQueueItems(items) {
   try {
     const res = await fetch(`${BASE}/followup-queue/items`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ items }),
     });
     if (!res.ok) {
@@ -147,7 +155,7 @@ export async function deleteFollowupQueueItems(items) {
 
 export async function deleteCampaign(id) {
   try {
-    const res = await fetch(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
+    const res = await fetch(`${BASE}/campaigns/${id}`, { method: 'DELETE', headers: getHeaders() });
     if (!res.ok) {
       const text = await res.text();
       console.error(`Delete campaign failed: ${res.status} ${text}`);
@@ -186,7 +194,7 @@ export async function saveTemplate({ id, name, html_content, template_type }) {
   const url = id ? `${BASE}/templates/${id}` : `${BASE}/templates`;
   const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ name, html_content, template_type: template_type || 'html' }),
   });
   const text = await res.text();
@@ -198,7 +206,7 @@ export async function saveTemplate({ id, name, html_content, template_type }) {
 }
 
 export async function deleteTemplate(id) {
-  const res = await fetch(`${BASE}/templates/${id}`, { method: 'DELETE' });
+  const res = await fetch(`${BASE}/templates/${id}`, { method: 'DELETE', headers: getHeaders() });
   const text = await res.text();
   if (!text) throw new Error('Server returned empty response');
   let json;
@@ -214,7 +222,7 @@ export async function fetchFollowupTemplates(campaignTemplateId) {
   try {
     const res = await fetch(
       `${BASE}/followup-templates?campaign_template_id=${campaignTemplateId}`,
-      { cache: 'no-store' }
+      { cache: 'no-store', headers: getHeaders() }
     );
     if (!res.ok) {
       // 404 means the route isn't registered yet (server restart pending).
@@ -240,7 +248,7 @@ export async function saveFollowupTemplate({ id, campaign_template_id, followup_
     : { campaign_template_id, followup_stage, delay_value, delay_unit, subject, body };
   const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify(payload),
   });
   const text = await res.text();
@@ -284,4 +292,103 @@ export async function fetchFollowupQueueList(params = {}) {
   Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') qs.set(k, v); });
   const json = await getJSON(`${BASE}/followup-queue/list?${qs}`);
   return json?.success ? { data: json.data, total: json.total, page: json.page, limit: json.limit } : { data: [], total: 0, page: 1, limit: 50 };
+}
+
+// ─── Suppressions ────────────────────────────────────────────────────────────
+
+export async function fetchSuppressions(params = {}) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') qs.set(k, v); });
+  const json = await getJSON(`${BASE}/suppressions?${qs}`);
+  return json?.success ? { data: json.data, total: json.total, page: json.page, limit: json.limit, stats: json.stats } : { data: [], total: 0, page: 1, limit: 50, stats: {} };
+}
+
+export async function addSuppression(email, reason) {
+  const res = await fetch(`${BASE}/suppressions`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ email, reason }),
+  });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'Failed to add suppression');
+  return json;
+}
+
+export async function deleteSuppression(email) {
+  const res = await fetch(`${BASE}/suppressions/${encodeURIComponent(email)}`, { method: 'DELETE', headers: getHeaders() });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'Failed to delete suppression');
+  return json;
+}
+
+// ─── Bulk Campaign Automation (auto-pilot campaigns) ──────────────────────────
+
+export async function fetchAutoCampaigns(params = {}) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') qs.set(k, v); });
+  const json = await getJSON(`${BASE}/campaign-automation?${qs}`);
+  return json?.success ? { items: json.items, total: json.total, page: json.page, limit: json.limit } : { items: [], total: 0, page: 1, limit: 20 };
+}
+
+export async function fetchAutoCampaign(id) {
+  const json = await getJSON(`${BASE}/campaign-automation/${id}`);
+  return json?.success ? json.data : null;
+}
+
+export async function fetchAutoCampaignProgress(id) {
+  const json = await getJSON(`${BASE}/campaign-automation/${id}/progress`);
+  return json?.success ? json.data : [];
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: getHeaders(), body: JSON.stringify(body) });
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { throw new Error('Invalid JSON from server: ' + text.slice(0, 200)); }
+  if (!res.ok || json.success === false) throw new Error(json.error || (json.errors || []).join(', ') || `Request failed (${res.status})`);
+  return json.data ?? json;
+}
+
+export async function createAutoCampaign({ campaignName, description, scheduleType }) {
+  return postJSON(`${BASE}/campaign-automation`, { campaignName, description, scheduleType });
+}
+
+export async function importAutoCampaignLeads(id, file) {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${BASE}/campaign-automation/${id}/import`, {
+    method: 'POST',
+    headers: getHeaders(false), // let the browser set the multipart Content-Type boundary
+    body: form,
+  });
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { throw new Error('Invalid JSON from server: ' + text.slice(0, 200)); }
+  if (!res.ok || json.success === false) throw new Error(json.error || 'Import failed');
+  return json.data;
+}
+
+export async function startAutoCampaign(id, { senders, scheduleType }) {
+  return postJSON(`${BASE}/campaign-automation/${id}/start`, { senders, scheduleType });
+}
+
+export async function pauseAutoCampaign(id) {
+  const res = await fetch(`${BASE}/campaign-automation/${id}/pause`, { method: 'PATCH', headers: getHeaders() });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'Failed to pause campaign');
+  return json.data;
+}
+
+export async function resumeAutoCampaign(id) {
+  const res = await fetch(`${BASE}/campaign-automation/${id}/resume`, { method: 'PATCH', headers: getHeaders() });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'Failed to resume campaign');
+  return json.data;
+}
+
+export async function deleteAutoCampaign(id) {
+  const res = await fetch(`${BASE}/campaign-automation/${id}`, { method: 'DELETE', headers: getHeaders() });
+  const json = await res.json();
+  if (!json.success) throw new Error(json.error || 'Failed to delete campaign');
+  return json;
 }

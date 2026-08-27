@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router";
 import { Page } from "components/shared/Page";
 import { Card, Button } from "components/ui";
-import { fetchCampaign } from "services/api";
+import { fetchCampaign, getHeaders } from "services/api";
 import { LeadsTable } from "components/LeadsTable";
 import { 
   ArrowLeftIcon, 
@@ -22,16 +22,24 @@ export default function CampaignDetails() {
   const [loading, setLoading] = useState(true);
   const [fuLoading, setFuLoading] = useState(false);
   const [fuMessage, setFuMessage] = useState(null);
+  const [hideRunningBadge, setHideRunningBadge] = useState(false);
+
+  useEffect(() => {
+    setHideRunningBadge(false);
+  }, [id]);
 
   const handleSendFollowUpNow = async () => {
     if (!window.confirm('Are you sure you want to send follow-ups to all eligible leads?')) return;
     setFuLoading(true);
     setFuMessage(null);
     try {
-      const res = await fetch(`${API}/api/campaigns/${id}/followup/send-now`, { method: 'POST' });
+      const res = await fetch(`${API}/api/campaigns/${id}/followup/send-now`, { method: 'POST', headers: getHeaders() });
       const data = await res.json();
       setFuMessage({ ok: res.ok, text: data.message || data.error });
-      if (res.ok) fetchCampaign(id).then(setCampaign).catch(console.error);
+      if (res.ok) {
+        setHideRunningBadge(true);
+        fetchCampaign(id).then(setCampaign).catch(console.error);
+      }
     } catch {
       setFuMessage({ ok: false, text: 'Request failed' });
     } finally {
@@ -49,7 +57,7 @@ export default function CampaignDetails() {
     };
     load();
     // Trigger a reply sync on mount so replied status is fresh
-    fetch(`${API}/api/replies/sync`, { method: 'POST' }).catch(() => {});
+    fetch(`${API}/api/replies/sync`, { method: 'POST', headers: getHeaders() }).catch(() => {});
     const interval = setInterval(load, 15000);
     return () => clearInterval(interval);
   }, [id]);
@@ -58,24 +66,11 @@ export default function CampaignDetails() {
   if (!campaign) return <Page title="Campaign Details"><div className="p-8 text-error">Campaign not found</div></Page>;
 
   const summary = campaign?.summary || { total: 0, sent: 0, pending: 0, failed: 0, replied: 0, completed: 0 };
-  const isCompleted = summary.total > 0 && summary.pending === 0;
-
   const totalLeads = parseInt(summary.total) || 0;
-  const sentLeads = parseInt(summary.sent) || 0;
-  const repliedLeads = parseInt(summary.replied) || 0;
-  // completed counts: Sent + Delivered + Replied + Completed + FollowupCompleted (OR has_replied=1)
-  const completedLeads = parseInt(summary.completed) || Math.min(sentLeads + repliedLeads, totalLeads);
-  const calculatedProgress = totalLeads > 0 ? Math.round((completedLeads / totalLeads) * 100) : 0;
-
-  console.log('[PROGRESS_DEBUG]', {
-    totalLeads,
-    sentLeads,
-    repliedLeads,
-    completedLeads,
-    calculatedProgress
-  });
-
-  const progress = calculatedProgress;
+  const pendingLeads = parseInt(summary.pending) || 0;
+  const completedLeads = parseInt(summary.completed) || 0;
+  const isCompleted = totalLeads > 0 && pendingLeads === 0;
+  const progress = totalLeads > 0 ? Math.round((completedLeads / totalLeads) * 100) : 0;
 
   const replyRate = summary.sent > 0
     ? parseFloat((parseInt(summary.replied || 0) / summary.sent * 100).toFixed(1))
@@ -87,6 +82,7 @@ export default function CampaignDetails() {
     { label: "Replied", value: parseInt(summary.replied || 0), icon: CheckCircleIcon, color: "text-green-600", bg: "bg-green-100/50", extra: replyRate > 0 ? `${replyRate}%` : null },
     { label: "Pending", value: summary.pending, icon: ClockIcon, color: "text-warning-500", bg: "bg-warning-100/50" },
     { label: "Failed", value: summary.failed, icon: XCircleIcon, color: "text-error", bg: "bg-error-100/50" },
+    { label: "Bounced", value: parseInt(summary.bounced || 0), icon: XCircleIcon, color: "text-error", bg: "bg-error-100/50" },
   ];
 
   return (
@@ -118,14 +114,14 @@ export default function CampaignDetails() {
               {fuLoading ? 'Queuing...' : 'Send Follow-up Now'}
             </Button>
             <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase w-fit ${
-              isCompleted ? 'bg-success-100 text-success' : 'bg-primary-100 text-primary-600'
+              isCompleted || hideRunningBadge ? 'bg-success-100 text-success' : 'bg-primary-100 text-primary-600'
             }`}>
-              {isCompleted ? 'COMPLETED' : 'RUNNING'}
+              {isCompleted || hideRunningBadge ? 'COMPLETED' : 'RUNNING'}
             </span>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5 sm:gap-5 lg:gap-6">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6 sm:gap-5 lg:gap-6">
           {stats.map((stat) => (
             <Card key={stat.label} className="p-5 flex items-center gap-4 border border-gray-100 dark:border-dark-700">
               <div className={`p-3 rounded-xl ${stat.bg} ${stat.color}`}>

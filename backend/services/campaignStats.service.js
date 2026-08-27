@@ -5,18 +5,27 @@ async function ensureCampaignStatsColumns() {
   await pool.query(`ALTER TABLE campaigns ADD COLUMN sent_count INT DEFAULT 0`).catch(() => {});
   await pool.query(`ALTER TABLE campaigns ADD COLUMN pending_count INT DEFAULT 0`).catch(() => {});
   await pool.query(`ALTER TABLE campaigns ADD COLUMN failed_count INT DEFAULT 0`).catch(() => {});
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN bounced_count INT DEFAULT 0`).catch(() => {});
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN reply_count INT DEFAULT 0`).catch(() => {});
+  await pool.query(`ALTER TABLE campaigns ADD COLUMN suppressed_count INT DEFAULT 0`).catch(() => {});
   await pool.query(`ALTER TABLE campaigns ADD COLUMN active_sender VARCHAR(255)`).catch(() => {});
 }
 
-function sentStatusSql(alias = '') {
+function processedStatusSql(alias = '') {
   const p = alias ? `${alias}.` : '';
   return `(
-    LOWER(COALESCE(${p}status, '')) IN ('sent', 'replied')
+    LOWER(COALESCE(${p}status, '')) IN ('sent', 'replied', 'bounced', 'failed', 'unsubscribed', 'suppressed')
     OR LOWER(COALESCE(${p}status, '')) LIKE 'follow-up%'
     OR COALESCE(${p}has_replied, 0) = 1
-    OR COALESCE(${p}message_id, '') != ''
-    OR COALESCE(${p}thread_id, '') != ''
+    OR COALESCE(${p}is_bounced, 0) = 1
+    OR (COALESCE(${p}message_id, '') != '' AND COALESCE(${p}thread_id, '') != ''
+        AND LOWER(COALESCE(${p}status, '')) NOT IN ('pending', 'queued'))
   )`;
+}
+
+function runningStatusSql(alias = '') {
+  const p = alias ? `${alias}.` : '';
+  return `LOWER(COALESCE(${p}status, '')) IN ('pending', 'queued')`;
 }
 
 async function recalculateCampaignStats(campaignId, activeSender = null) {
@@ -26,10 +35,13 @@ async function recalculateCampaignStats(campaignId, activeSender = null) {
   const { rows } = await pool.query(
     `SELECT
        COUNT(*) AS total,
-       SUM(CASE WHEN ${sentStatusSql()} THEN 1 ELSE 0 END) AS sent,
-       SUM(CASE WHEN LOWER(COALESCE(status, '')) IN ('pending', 'queued') THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN ${processedStatusSql()} THEN 1 ELSE 0 END) AS processed,
+       SUM(CASE WHEN ${runningStatusSql()} THEN 1 ELSE 0 END) AS pending,
        SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'failed' THEN 1 ELSE 0 END) AS failed,
+       SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'bounced' OR COALESCE(is_bounced, 0) = 1 THEN 1 ELSE 0 END) AS bounced,
        SUM(CASE WHEN COALESCE(has_replied, 0) = 1 THEN 1 ELSE 0 END) AS replied,
+       SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'suppressed' THEN 1 ELSE 0 END) AS suppressed,
+       SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'sent' OR LOWER(COALESCE(status, '')) LIKE 'follow-up%' OR COALESCE(has_replied, 0) = 1 OR COALESCE(is_bounced, 0) = 1 THEN 1 ELSE 0 END) AS sent,
        (SELECT sender_email FROM leads
         WHERE campaign_id = ? AND sender_email IS NOT NULL AND sender_email != ''
         GROUP BY sender_email ORDER BY COUNT(*) DESC LIMIT 1) AS lead_sender
@@ -40,11 +52,16 @@ async function recalculateCampaignStats(campaignId, activeSender = null) {
 
   const stats = rows[0] || {};
   const total = parseInt(stats.total) || 0;
-  const sent = parseInt(stats.sent) || 0;
+  const processed = parseInt(stats.processed) || 0;
   const pending = parseInt(stats.pending) || 0;
   const failed = parseInt(stats.failed) || 0;
+  const bounced = parseInt(stats.bounced) || 0;
   const replied = parseInt(stats.replied) || 0;
+  const suppressed = parseInt(stats.suppressed) || 0;
+  const sent = parseInt(stats.sent) || 0;
   const sender = activeSender || stats.lead_sender || null;
+
+  const campaignStatus = (total > 0 && pending === 0) ? 'Completed' : 'Running';
 
   await pool.query(
     `UPDATE campaigns
@@ -52,19 +69,26 @@ async function recalculateCampaignStats(campaignId, activeSender = null) {
          sent_count = ?,
          pending_count = ?,
          failed_count = ?,
-         active_sender = COALESCE(?, active_sender)
+         reply_count = ?,
+         bounced_count = ?,
+         suppressed_count = ?,
+         active_sender = COALESCE(?, active_sender),
+         status = ?
      WHERE id = ?`,
-    [total, sent, pending, failed, sender, campaignId]
+    [total, sent, pending, failed, replied, bounced, suppressed, sender, campaignStatus, campaignId]
   );
 
-  console.log(`[CAMPAIGN_STATS] campaign=${campaignId} total=${total} sent=${sent} replied=${replied} pending=${pending} failed=${failed} sender=${sender || 'Auto Rotation'}`);
+  console.log(`[CAMPAIGN_STATS] campaign=${campaignId} total=${total} processed=${processed} sent=${sent} replied=${replied} pending=${pending} failed=${failed} bounced=${bounced} suppressed=${suppressed} status=${campaignStatus} sender=${sender || 'Auto Rotation'}`);
   return {
     total,
     sent,
     replied,
     pending,
     failed,
-    progress: total > 0 ? Math.round((sent / total) * 100) : 0,
+    bounced,
+    suppressed,
+    progress: total > 0 ? Math.round((processed / total) * 100) : 0,
+    status: campaignStatus,
     active_sender: sender,
   };
 }
@@ -72,5 +96,5 @@ async function recalculateCampaignStats(campaignId, activeSender = null) {
 module.exports = {
   ensureCampaignStatsColumns,
   recalculateCampaignStats,
-  sentStatusSql,
+  processedStatusSql,
 };

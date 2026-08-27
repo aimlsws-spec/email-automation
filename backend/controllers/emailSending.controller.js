@@ -8,6 +8,7 @@ async function sendBulkInitial(req, res) {
   console.log("[SEND] Campaign started");
   console.log("REQ BODY:", req.body);
   try {
+    const userId = req.user.id;
     const { campaignName, subject, fromName, senderEmail, sendingMode, domainAccounts, gmailAccounts, templateHtml, templateType, campaignId: incomingCampaignId, initialTemplateId } = req.body;
     const resolvedTemplateType = templateType === 'text' ? 'text' : 'html';
 
@@ -86,6 +87,7 @@ async function sendBulkInitial(req, res) {
 
     console.log(`[SEND] Campaign ${campaignId} | sending_type=${sendingType} | sender=${sendingType === 'gmail' ? JSON.stringify(gmailAccounts) : JSON.stringify(domainAccounts)}`);
     console.log('SAVED SUBJECT:', subject);
+    console.log('[FOLLOWUP_CREATE] initialTemplateId:', initialTemplateId || null, 'campaignId:', campaignId);
 
     // Ensure queue columns exist
     await pool.query(`ALTER TABLE email_queue ADD COLUMN sending_mode VARCHAR(50) DEFAULT 'domain'`).catch(() => {});
@@ -141,9 +143,9 @@ async function sendBulkInitial(req, res) {
           console.log("QUEUE ADD:", campaignId, lead.email);
           try {
             await pool.query(
-              `INSERT INTO email_queue (lead_email, campaign_id, subject, html_body, status, sending_mode, sender_email)
-               VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
-              [lead.email, campaignId, finalSubject, baseHtml, sendingType, jobSender]
+              `INSERT INTO email_queue (lead_email, campaign_id, subject, html_body, status, sending_mode, sender_email, user_id)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
+              [lead.email, campaignId, finalSubject, baseHtml, sendingType, jobSender, userId]
             );
             console.log(`[QUEUE_ADD] campaign=${campaignId} recipient=${lead.email} sender=${jobSender || 'worker-rotation'} status=pending`);
           } catch (insertErr) {

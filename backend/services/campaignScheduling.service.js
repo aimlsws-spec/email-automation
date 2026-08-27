@@ -164,15 +164,37 @@ async function startCampaign(campaignId, { senders, scheduleType, userId }) {
     [campaignId, `Assigned ${leadIdRows.length} leads across ${campaignSenders.length} sender(s), schedule=${finalScheduleType}`]
   );
 
+  // Stagger senders into a rotation — only the first sender fires today;
+  // each later sender's clock is pushed out by one extra day so exactly one
+  // sender sends per day, cycling through the full list (day 1: sender A,
+  // day 2: sender B, day 3: sender C, ... looping back to A once every
+  // sender has had a turn) instead of all senders firing simultaneously.
+  const { rows: freshSenders } = await pool.query(
+    `SELECT * FROM campaign_senders WHERE campaign_id = ? ORDER BY id ASC`,
+    [campaignId]
+  );
+  for (let i = 0; i < freshSenders.length; i++) {
+    const sender = freshSenders[i];
+    if (i === 0) {
+      await releaseBatchForSender({ id: campaignId, uploaded_by: userId }, sender);
+    } else {
+      await pool.query(
+        `UPDATE campaign_senders SET next_eligible_date = CURDATE() + INTERVAL ? DAY WHERE id = ?`,
+        [i, sender.id]
+      );
+    }
+  }
+
   return { campaignId, sendersAssigned: campaignSenders.length, leadsAssigned: leadIdRows.length };
 }
 
 /**
  * Cron entry point. For every Running campaign, release the next due batch
- * (up to batch_size leads) for each sender whose every-other-day clock has
- * come due, bridging released leads into the legacy leads/email_queue
- * tables so the existing worker/follow-up/reply pipeline picks them up
- * unmodified.
+ * (up to batch_size leads) for each sender whose rotation turn has come due
+ * today, bridging released leads into the legacy leads/email_queue tables so
+ * the existing worker/follow-up/reply pipeline picks them up unmodified.
+ * Senders take turns one per day (see startCampaign / releaseBatchForSender),
+ * so normally only one sender is due on any given day.
  */
 async function releaseDueBatches() {
   const { rows: campaigns } = await pool.query(
@@ -193,6 +215,7 @@ async function releaseDueBatches() {
       totalReleased += released;
     }
 
+    await syncCampaignLeadsStatus(campaign.id);
     await maybeCompleteCampaign(campaign.id);
   }
 
@@ -265,9 +288,18 @@ async function releaseBatchForSender(campaign, sender) {
     releasedCount++;
   }
 
+  // Rotation, not parallel every-other-day: a sender's next turn comes only
+  // after every other sender in this campaign has had one turn, so exactly
+  // one sender fires per day, cycling through the full sender list.
+  const { rows: countRows } = await pool.query(
+    `SELECT COUNT(*) AS cnt FROM campaign_senders WHERE campaign_id = ?`,
+    [campaign.id]
+  );
+  const rotationDays = Math.max(1, parseInt(countRows[0]?.cnt, 10) || 1);
+
   await pool.query(
-    `UPDATE campaign_senders SET last_batch_no = ?, next_eligible_date = CURDATE() + INTERVAL 2 DAY WHERE id = ?`,
-    [nextBatchNo, sender.id]
+    `UPDATE campaign_senders SET last_batch_no = ?, next_eligible_date = CURDATE() + INTERVAL ? DAY WHERE id = ?`,
+    [nextBatchNo, rotationDays, sender.id]
   );
 
   console.log(
@@ -296,6 +328,35 @@ async function findNowSuppressedEmails(emails, excludeLegacyCampaignId) {
     if (!isTerminal) suppressed.add(String(row.email).toLowerCase());
   }
   return suppressed;
+}
+
+/**
+ * Once a batch is released, campaign_leads is stamped 'Queued' and never
+ * touched again — the actual send/reply pipeline (queueWorker.js,
+ * replyCheck.service.js) only updates the legacy `leads` table. Without this,
+ * the per-sender progress dashboard shows leads stuck at "In-Flight" forever,
+ * even after they've actually sent or gotten a reply. Pulls the real outcome
+ * back from `leads` for every still-in-flight campaign_leads row.
+ */
+async function syncCampaignLeadsStatus(campaignId) {
+  await pool.query(
+    `UPDATE campaign_leads cl
+     JOIN campaign_senders cs ON cs.id = cl.assigned_sender_id
+     JOIN leads l ON l.email = cl.email AND l.campaign_id = cs.legacy_campaign_id
+     SET cl.processing_status = CASE
+           WHEN l.has_replied = 1 THEN 'Replied'
+           WHEN l.is_bounced = 1 THEN 'Failed'
+           WHEN LOWER(COALESCE(l.status, '')) = 'sent' THEN 'Sent'
+           WHEN LOWER(COALESCE(l.status, '')) = 'replied' THEN 'Replied'
+           WHEN LOWER(COALESCE(l.status, '')) = 'failed' THEN 'Failed'
+           WHEN LOWER(COALESCE(l.status, '')) = 'bounced' THEN 'Failed'
+           WHEN LOWER(COALESCE(l.status, '')) = 'unsubscribed' THEN 'Completed'
+           ELSE cl.processing_status
+         END,
+         cl.replied = CASE WHEN l.has_replied = 1 THEN 1 ELSE cl.replied END
+     WHERE cl.campaign_id = ? AND cl.processing_status IN ('Queued', 'Scheduled')`,
+    [campaignId]
+  );
 }
 
 async function maybeCompleteCampaign(campaignId) {
@@ -343,6 +404,8 @@ async function getCampaignProgress(campaignId, userId) {
     err.statusCode = 404;
     throw err;
   }
+
+  await syncCampaignLeadsStatus(campaignId);
 
   const { rows: senders } = await pool.query(
     `SELECT cs.id, cs.sender_email, cs.batch_size, cs.last_batch_no, cs.next_eligible_date,

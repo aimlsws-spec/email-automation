@@ -2,7 +2,6 @@ import axios from 'axios';
 
 import { JWT_HOST_API } from 'configs/auth.config';
 
-
 const axiosInstance = axios.create({
   baseURL: JWT_HOST_API,
 });

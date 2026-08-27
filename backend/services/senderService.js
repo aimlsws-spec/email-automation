@@ -154,7 +154,7 @@ async function getSenderStats() {
     [today, FIXED_DAILY_LIMIT, today]
   );
   const { rows } = await pool.query(`
-    SELECT email, daily_sent_count, daily_limit, status, is_connected,
+    SELECT email, daily_sent_count, daily_limit, status, is_connected, user_id,
            COALESCE(type, 'gmail') AS type
     FROM sender_accounts ORDER BY type ASC, email ASC
   `);

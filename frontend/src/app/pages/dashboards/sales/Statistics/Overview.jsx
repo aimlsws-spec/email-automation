@@ -12,7 +12,7 @@ import {
 
 // Local Imports
 import { Avatar, Card } from "components/ui";
-import { fetchDashboard } from "services/api";
+import { fetchDashboard, getHeaders } from "services/api";
 
 // ----------------------------------------------------------------------
 
@@ -35,7 +35,7 @@ export function Overview() {
   async function handleSyncReplies() {
     setSyncing(true);
     try {
-      await fetch('/api/replies/sync', { method: 'POST' });
+      await fetch('/api/replies/sync', { method: 'POST', headers: getHeaders() });
       await load();
     } catch (e) {
       console.error('Reply sync failed:', e);

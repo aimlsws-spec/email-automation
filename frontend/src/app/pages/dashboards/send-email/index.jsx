@@ -5,6 +5,7 @@ import { Page } from "components/shared/Page";
 import { TemplateTab } from "./components/TemplateTab";
 import { CampaignTab } from "./components/CampaignTab";
 import { SenderTab } from "./components/SenderTab";
+import { getJSON, getHeaders } from "services/api";
 // ----------------------------------------------------------------------
 
 const TABS = ["Template", "Campaign", "Sender"];
@@ -48,12 +49,10 @@ export default function SendEmail() {
   const fetchSenders = useCallback(async () => {
     try {
       setLoadingStats(true);
-      const [statsRes, sendersRes] = await Promise.all([
-        fetch("/api/senders/stats"),
-        fetch("/api/senders"),
+      const [statsData, sendersData] = await Promise.all([
+        getJSON("/api/senders/stats"),
+        getJSON("/api/senders"),
       ]);
-      const statsData = await statsRes.json();
-      const sendersData = await sendersRes.json();
 
       if (statsData.success) {
         const accounts = statsData.data.accounts || [];
@@ -101,18 +100,18 @@ export default function SendEmail() {
       const url = campaignId
         ? `/api/leads/pending?campaignId=${campaignId}`
         : '/api/leads/pending';
-      const res = await fetch(url);
-      const data = await res.json();
-      setPendingCount(data.count || 0);
+      const data = await getJSON(url);
+      setPendingCount(data?.count || 0);
     } catch (err) {
       console.error("Failed to fetch pending leads:", err);
     }
   }, []);
 
   useEffect(() => {
-    fetchPendingCount();
+    // Do NOT fetch pending count on mount — count must only reflect the current upload.
+    // fetchPendingCount() without a campaignId would show stale leads from previous campaigns.
     fetchSenders();
-  }, [fetchPendingCount, fetchSenders]);
+  }, [fetchSenders]);
 
   // Refresh capacity when user returns from another tab (e.g. after OAuth)
   useEffect(() => {
@@ -135,7 +134,7 @@ export default function SendEmail() {
       formData.append("campaignName", campaignData.name);
       formData.append("subject", campaignData.subject);
       if (uploadedCampaignId) formData.append("campaignId", uploadedCampaignId);
-      const res = await fetch("/api/upload-leads", { method: "POST", body: formData });
+      const res = await fetch("/api/upload-leads", { method: "POST", headers: getHeaders(false), body: formData });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Upload failed");
       setUploadStatus("success");
@@ -144,12 +143,21 @@ export default function SendEmail() {
         setUploadedCampaignId(data.campaignId);
         await fetchPendingCount(data.campaignId);
       } else {
-        await fetchPendingCount();
+        // If API did not return a campaignId, prefer using the upload response counts
+        // rather than fetching a global pending count which may include previous campaigns.
+        setPendingCount(data.inserted ?? data.valid ?? 0);
       }
     } catch (err) {
       setUploadStatus("error");
       setUploadResult({ message: err.message });
     }
+  }
+
+  function handleClearUpload() {
+    setUploadStatus(null);
+    setUploadResult(null);
+    setUploadedCampaignId(null);
+    setPendingCount(0);
   }
 
   async function handleBulkSend() {
@@ -188,7 +196,7 @@ export default function SendEmail() {
 
       const res = await fetch("/api/send-bulk-initial", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getHeaders(),
         body: JSON.stringify(payload),
       });
 
@@ -270,6 +278,7 @@ export default function SendEmail() {
             bulkStatus={bulkStatus}
             bulkMessage={bulkMessage}
             onUpload={handleUpload}
+            onClearUpload={handleClearUpload}
             onSend={handleBulkSend}
             senderStats={senderStats}
             globalStats={globalStats}

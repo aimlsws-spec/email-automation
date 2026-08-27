@@ -8,20 +8,18 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import clsx from "clsx";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // Import Dependencies
 import { CollapsibleSearch } from "components/shared/CollapsibleSearch";
 import { TableSortIcon } from "components/shared/table/TableSortIcon";
 import { Card, Table, THead, TBody, Th, Tr, Td } from "components/ui";
 import { fuzzyFilter } from "utils/react-table/fuzzyFilter";
-import { SelectedRowsActions } from "components/shared/table/SelectedRowsActions";
-import { useBoxSize, useDidUpdate } from "hooks";
-import { useSkipper } from "utils/react-table/useSkipper";
+import { useDidUpdate } from "hooks";
 import { MenuAction } from "./MenuActions";
 import { columns } from "./columns";
 import { PaginationSection } from "./PaginationSection";
-import { fetchLeads } from "services/api";
+import { fetchLeads, getJSON } from "services/api";
 import { getUserAgentBrowser } from "utils/dom/getUserAgentBrowser";
 
 // ----------------------------------------------------------------------
@@ -29,34 +27,14 @@ import { getUserAgentBrowser } from "utils/dom/getUserAgentBrowser";
 const isSafari = getUserAgentBrowser() === "Safari";
 
 export function LeadsTable({ campaignId = null }) {
-  const [autoResetPageIndex, skipAutoResetPageIndex] = useSkipper();
-
-  const theadRef = useRef();
-
-  const { height: theadHeight } = useBoxSize({ ref: theadRef });
-
   const [products, setProducts] = useState([]);
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        if (campaignId) {
-          const res = await fetch(`/api/campaigns/${campaignId}/leads`);
-          const json = res.ok ? await res.json() : null;
-          const leads = json?.data ?? (Array.isArray(json) ? json : []);
-          setProducts(leads);
-        } else {
-          const d = await fetchLeads(null);
-          setProducts(Array.isArray(d) ? d : []);
-        }
-      } catch {
-        setProducts([]);
-      }
-    };
-    load();
-    const intervalId = setInterval(load, 5000);
-    return () => clearInterval(intervalId);
-  }, [campaignId]);
+  // Controlled pagination state — keeps page across data refreshes
+  const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: 10 });
+
+  // Ref so the polling callback always reads the latest page without being a dependency
+  const paginationRef = useRef(pagination);
+  paginationRef.current = pagination;
 
   const [globalFilter, setGlobalFilter] = useState("");
   const [sorting, setSorting] = useState([]);
@@ -67,30 +45,23 @@ export function LeadsTable({ campaignId = null }) {
     state: {
       globalFilter,
       sorting,
+      pagination,
     },
     filterFns: {
       fuzzy: fuzzyFilter,
     },
     meta: {
       deleteRow: (row) => {
-        // Skip page index reset until after next rerender
-        skipAutoResetPageIndex();
-        setProducts((old) =>
-          old.filter((oldRow) => oldRow.id !== row.original.id),
-        );
-      },
-      deleteRows: (rows) => {
-        // Skip page index reset until after next rerender
-        skipAutoResetPageIndex();
-        const rowIds = rows.map((row) => row.original.id);
-        setProducts((old) =>
-          old.filter((row) => !rowIds.includes(row.id)),
-        );
+        setProducts((old) => old.filter((oldRow) => oldRow.id !== row.original.id));
       },
     },
     getCoreRowModel: getCoreRowModel(),
 
-    onGlobalFilterChange: setGlobalFilter,
+    onGlobalFilterChange: (value) => {
+      // Reset to page 1 only when search text changes
+      setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+      setGlobalFilter(value);
+    },
     getFilteredRowModel: getFilteredRowModel(),
     globalFilterFn: fuzzyFilter,
 
@@ -99,8 +70,48 @@ export function LeadsTable({ campaignId = null }) {
 
     getPaginationRowModel: getPaginationRowModel(),
 
-    autoResetPageIndex,
+    // Disable automatic page reset — we manage it via controlled state
+    autoResetPageIndex: false,
+
+    onPaginationChange: (updater) => {
+      setPagination((prev) => {
+        const next = typeof updater === "function" ? updater(prev) : updater;
+        console.log(
+          `[PAGINATION] Current Page: ${next.pageIndex + 1} | Page Size: ${next.pageSize}`
+        );
+        return next;
+      });
+    },
   });
+
+  const load = useCallback(async () => {
+    const { pageIndex, pageSize } = paginationRef.current;
+    console.log(
+      `[PAGINATION] Auto Refresh: Triggered | Current Page: ${pageIndex + 1} | Page Size: ${pageSize}`
+    );
+    try {
+      let leads;
+      if (campaignId) {
+        const json = await getJSON(`/api/campaigns/${campaignId}/leads`);
+        leads = json?.data ?? (Array.isArray(json) ? json : []);
+      } else {
+        const d = await fetchLeads(null);
+        leads = Array.isArray(d) ? d : [];
+      }
+      console.log(`[API] Returned Records: ${leads.length}`);
+      setProducts(leads);
+      // Preserve current page — pagination state is controlled so it won't reset
+      console.log(`[TABLE] After Refresh: Page ${paginationRef.current.pageIndex + 1}`);
+    } catch {
+      setProducts([]);
+    }
+  }, [campaignId]);
+
+  useEffect(() => {
+    load();
+    const intervalId = setInterval(load, 5000);
+    return () => clearInterval(intervalId);
+  }, [load]);
 
   useDidUpdate(() => table.resetRowSelection(), [products]);
 
@@ -114,7 +125,7 @@ export function LeadsTable({ campaignId = null }) {
           <CollapsibleSearch
             placeholder="Search here..."
             value={globalFilter ?? ""}
-            onChange={(e) => setGlobalFilter(e.target.value)}
+            onChange={(e) => table.setGlobalFilter(e.target.value)}
           />
           <MenuAction />
         </div>
@@ -122,7 +133,7 @@ export function LeadsTable({ campaignId = null }) {
       <Card className="relative mt-3 flex grow flex-col">
         <div className="table-wrapper min-w-full grow overflow-x-auto">
           <Table hoverable className="w-full text-left rtl:text-right">
-            <THead ref={theadRef}>
+            <THead>
               {table.getHeaderGroups().map((headerGroup) => (
                 <Tr key={headerGroup.id}>
                   {headerGroup.headers.map((header) => (
@@ -196,7 +207,6 @@ export function LeadsTable({ campaignId = null }) {
             <PaginationSection table={table} />
           </div>
         )}
-        <SelectedRowsActions table={table} height={theadHeight} />
       </Card>
     </div>
   );

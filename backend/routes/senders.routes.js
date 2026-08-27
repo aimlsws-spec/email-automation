@@ -13,4 +13,11 @@ router.get('/api/sender-stats', async (req, res) => {
   }
 });
 
+const senderController = require('../controllers/sender.controller');
+
+router.get('/api/senders', senderController.getSenders);
+router.get('/api/senders/stats', senderController.getSenderStats);
+router.post('/api/senders', senderController.addSender);
+router.delete('/api/senders/:email', senderController.deleteSender);
+
 module.exports = router;

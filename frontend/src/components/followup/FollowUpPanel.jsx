@@ -8,6 +8,7 @@ import {
   NoSymbolIcon,
 } from "@heroicons/react/24/outline";
 import { CheckCircleIcon as CheckCircleSolid } from "@heroicons/react/24/solid";
+import { getJSON, getHeaders } from "services/api";
 
 // ─── Status badge ────────────────────────────────────────────────────────────
 function StatusBadge({ lead }) {
@@ -91,15 +92,15 @@ export function FollowUpPanel({ campaignId = null }) {
   // ── Global automation status ──────────────────────────────────────────────
   const [autoEnabled, setAutoEnabled] = useState(null); // null = loading
   const [autoLoading, setAutoLoading] = useState(false);
+  const [autoDiagnostics, setAutoDiagnostics] = useState(null);
 
   const fetchAutoStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/followup/automation/status");
-      const data = await res.json();
-      if (data.success) {
+      const data = await getJSON("/api/followup/automation/status");
+      if (data?.success) {
         setAutoEnabled(data.enabled);
       } else {
-        console.error("[AUTO] status API error:", data.error);
+        console.error("[AUTO] status API error:", data?.error);
         setAutoEnabled("error");
       }
     } catch (err) {
@@ -108,21 +109,51 @@ export function FollowUpPanel({ campaignId = null }) {
     }
   }, []);
 
-  useEffect(() => { fetchAutoStatus(); }, [fetchAutoStatus]);
+  const fetchAutoDiagnostics = useCallback(async () => {
+    try {
+      const res = await fetch("/api/followup/diagnostics", { headers: getHeaders() });
+      const data = await res.json();
+      if (data?.success) {
+        setAutoDiagnostics(data);
+      } else {
+        console.error("[AUTO] diagnostics API error:", data?.error);
+        setAutoDiagnostics(null);
+      }
+    } catch (err) {
+      console.error("[AUTO] diagnostics fetch failed:", err);
+      setAutoDiagnostics(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAutoStatus();
+    fetchAutoDiagnostics();
+  }, [fetchAutoStatus, fetchAutoDiagnostics]);
 
   async function handleAutoToggle(pause) {
     setAutoLoading(true);
     try {
       const res = await fetch(
         pause ? "/api/followup/automation/pause" : "/api/followup/automation/resume",
-        { method: "POST" }
+        { method: "POST", headers: getHeaders() }
       );
       const data = await res.json();
-      if (data.success) setAutoEnabled(data.enabled);
+      console.log("[AUTO] toggle response:", data);
+      if (data?.success) {
+        setAutoEnabled(data.enabled);
+        setActionMsg(`Automation ${data.enabled ? 'resumed' : 'paused'}`);
+        await fetchAutoStatus();
+        await fetchAutoDiagnostics();
+      } else {
+        const message = data?.error || data?.message || "Failed to update automation status";
+        setActionMsg(message);
+      }
     } catch (err) {
       console.error("[AUTO] toggle failed:", err);
+      setActionMsg(err.message || "Automation toggle error");
     } finally {
       setAutoLoading(false);
+      setTimeout(() => setActionMsg(""), 4000);
     }
   }
 
@@ -132,7 +163,7 @@ export function FollowUpPanel({ campaignId = null }) {
       const url = campaignId
         ? `/api/followup/analytics/v2?campaignId=${campaignId}`
         : "/api/followup/analytics/v2";
-      const res  = await fetch(url);
+      const res  = await fetch(url, { headers: getHeaders() });
       const data = await res.json();
       if (data.success) setAnalytics(data);
     } catch (err) {
@@ -153,7 +184,7 @@ export function FollowUpPanel({ campaignId = null }) {
     setTimelineLoading(true);
     setTimeline(null);
     try {
-      const res  = await fetch(`/api/followup/timeline/${encodeURIComponent(email)}`);
+      const res  = await fetch(`/api/followup/timeline/${encodeURIComponent(email)}`, { headers: getHeaders() });
       const data = await res.json();
       if (data.success) setTimeline(data);
     } catch (err) {
@@ -167,7 +198,7 @@ export function FollowUpPanel({ campaignId = null }) {
     try {
       const res  = await fetch(endpoint, {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...getHeaders(), "Content-Type": "application/json" },
         body:    JSON.stringify({ email }),
       });
       const data = await res.json();
@@ -186,26 +217,36 @@ export function FollowUpPanel({ campaignId = null }) {
     <div className="space-y-6">
       {/* ── Global automation status + controls ── */}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-5 py-3 dark:border-dark-600 dark:bg-dark-800">
-        <div className="flex items-center gap-2.5">
-          <span className="text-sm font-semibold text-gray-700 dark:text-dark-200">
-            Automation
-          </span>
-          {autoEnabled === null ? (
-            <span className="text-xs text-gray-400 dark:text-dark-400">Loading…</span>
-          ) : autoEnabled === "error" ? (
-            <span className="text-xs text-error dark:text-error-400">Status Unavailable</span>
-          ) : (
-            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-              autoEnabled
-                ? "bg-success-100 text-success dark:bg-success-900/30"
-                : "bg-warning-100 text-warning-700 dark:bg-warning-900/30"
-            }`}>
-              <span className={`size-1.5 rounded-full ${autoEnabled ? "bg-success" : "bg-warning-500"}`} />
-              {autoEnabled ? "RUNNING" : "PAUSED"}
+        <div className="flex flex-col gap-2.5">
+          <div className="flex items-center gap-2.5">
+            <span className="text-sm font-semibold text-gray-700 dark:text-dark-200">
+              Automation
             </span>
+            {autoEnabled === null ? (
+              <span className="text-xs text-gray-400 dark:text-dark-400">Loading…</span>
+            ) : autoEnabled === "error" ? (
+              <span className="text-xs text-error dark:text-error-400">Status Unavailable</span>
+            ) : (
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                autoEnabled
+                  ? "bg-success-100 text-success dark:bg-success-900/30"
+                  : "bg-warning-100 text-warning-700 dark:bg-warning-900/30"
+              }`}>
+                <span className={`size-1.5 rounded-full ${autoEnabled ? "bg-success" : "bg-warning-500"}`} />
+                {autoEnabled ? "RUNNING" : "PAUSED"}
+              </span>
+            )}
+          </div>
+          {autoDiagnostics && (
+            <div className="flex flex-wrap gap-3 text-[11px] text-gray-500 dark:text-dark-400">
+              <span>PendingLeads: {autoDiagnostics.db.pendingLeads}</span>
+              <span>OverdueLeads: {autoDiagnostics.db.overdueLeads}</span>
+              <span>QueueEligible: {autoDiagnostics.queueStatus?.eligible ?? '—'}</span>
+              <span>QueueFuture: {autoDiagnostics.queueStatus?.future ?? '—'}</span>
+            </div>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">  
           {autoEnabled === true && (
             <button
               onClick={() => handleAutoToggle(true)}
@@ -230,9 +271,9 @@ export function FollowUpPanel({ campaignId = null }) {
       {/* ── Summary cards ── */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
-          { label: "In Sequence",  value: totals.in_sequence      ?? "—", color: "text-primary-600" },
+          { label: "In Sequence",  value: totals.in_sequence ?? 0, color: "text-primary-600" },
           { label: "Replied",      value: totals.replied           ?? "—", color: "text-success" },
-          { label: "Pending",      value: totals.pending           ?? "—", color: "text-warning-600" },
+          { label: "Pending",      value: totals.pending ?? 0, color: "text-warning-600" },
           { label: "Unsubscribed", value: totals.unsubscribed      ?? "—", color: "text-gray-500" },
         ].map(({ label, value, color }) => (
           <div key={label} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-600 dark:bg-dark-800">

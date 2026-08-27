@@ -6,6 +6,8 @@ const { getGmailService } = require('../config/gmail');
 const { handleReplyDetected } = require('./automatedFollowUp.service');
 const { createLeadFromReply, ensureReplyLeadsTable } = require('./leadDetection.service');
 const { trackEvent } = require('./eventTracker.service');
+const { recalculateCampaignStats } = require('./campaignStats.service');
+const { isBounceNotification, handleBounceNotification } = require('./suppression.service');
 
 // ─── Safe column migration ────────────────────────────────────────────────────
 async function ensureReplyColumns() {
@@ -93,7 +95,7 @@ function buildReplyMatcher(leads) {
     if (messageId) msgIdToLead.set(messageId, lead);
 
     const subject = normalizeSubject(lead.last_subject);
-    const key = `${normalizeEmail(lead.email)}|${subject}`;
+    const key = `${normalizeEmail(lead.email)}|${lead.campaign_id ?? '0'}|${subject}`;
     if (lead.email && subject && !emailSubjectToLead.has(key)) {
       emailSubjectToLead.set(key, lead);
     }
@@ -106,14 +108,17 @@ function buildReplyMatcher(leads) {
       if (lead) return { lead, matchedMessageId: id, matchMethod: 'headers' };
     }
 
-    const key = `${normalizeEmail(from)}|${normalizeSubject(subject)}`;
-    const lead = emailSubjectToLead.get(key);
-    if (lead) {
-      return {
-        lead,
-        matchedMessageId: normalizeMessageId(lead.message_id),
-        matchMethod: 'sender_subject',
-      };
+    const normalizedFrom = normalizeEmail(from);
+    const normalizedSubject = normalizeSubject(subject);
+
+    for (const [key, lead] of emailSubjectToLead) {
+      if (key.startsWith(`${normalizedFrom}|`) && key.endsWith(`|${normalizedSubject}`)) {
+        return {
+          lead,
+          matchedMessageId: normalizeMessageId(lead.message_id),
+          matchMethod: 'sender_subject',
+        };
+      }
     }
 
     return null;
@@ -250,8 +255,8 @@ async function markReplied(email, campaignId, senderEmail) {
         status            = 'Replied',
         next_follow_up_at = NULL,
         last_activity_at  = NOW()
-    WHERE email = ? AND has_replied = 0
-  `, [email]);
+    WHERE email = ? AND campaign_id = ? AND has_replied = 0
+  `, [email, campaignId]);
 
   const affected = result?.affectedRows ?? result?.rowCount ?? 0;
   if (affected > 0) {
@@ -269,15 +274,24 @@ async function markReplied(email, campaignId, senderEmail) {
         [senderEmail]
       ).catch(err => console.error(`[REPLY] sender stats update failed:`, err.message));
       const domain = senderEmail.includes('@') ? senderEmail.split('@').pop().toLowerCase() : '';
-      await trackEvent({ lead_email: email, campaign_id: campaignId, domain, type: 'replied' }).catch(() => {});
+      const { rows: [senderRow] } = await pool.query(
+        `SELECT user_id FROM sender_accounts WHERE email = ? LIMIT 1`,
+        [senderEmail]
+      ).catch(() => ({ rows: [] }));
+      await trackEvent({ lead_email: email, campaign_id: campaignId, domain, type: 'replied', user_id: senderRow?.user_id || null }).catch(() => {});
     }
     await pool.query(
-      `UPDATE email_events SET replied = 1, status = 'replied' WHERE recipient_email = ?`,
-      [email]
+      `UPDATE email_events SET replied = 1, status = 'replied' WHERE recipient_email = ? AND sender_email = ?`,
+      [email, senderEmail]
     ).catch(() => {});
-    await handleReplyDetected(email).catch(err =>
-      console.error(`[REPLY] handleReplyDetected failed for ${email}:`, err.message)
+    await handleReplyDetected(email, campaignId).catch(err =>
+      console.error(`[REPLY] handleReplyDetected failed for ${email} campaign=${campaignId}:`, err.message)
     );
+    if (campaignId) {
+      await recalculateCampaignStats(campaignId).catch(err =>
+        console.error(`[REPLY] recalculateCampaignStats failed for campaign ${campaignId}:`, err.message)
+      );
+    }
     return true;
   }
   return false;
@@ -299,6 +313,13 @@ async function scanImapInbox(senderAccount, matchReply) {
     auth: { user, pass },
     logger: false,
     tls: { rejectUnauthorized: false },
+    connectionTimeout: 15000,
+    socketTimeout: 30000,
+  });
+
+  // Prevent uncaught socket errors (ETIMEOUT, ECONNRESET) from crashing the process
+  client.on('error', err => {
+    console.warn(`[REPLY] IMAP client error for ${user}@${host}:`, err.message);
   });
 
   const replies = [];
@@ -326,6 +347,18 @@ async function scanImapInbox(senderAccount, matchReply) {
         const from       = msg.envelope?.from?.[0]?.address || '';
         const subject    = msg.envelope?.subject || '';
         const date       = msg.envelope?.date || null;
+
+        // ── Bounce notification → extract & suppress, skip reply handling ─
+        if (isBounceNotification(from, subject)) {
+          try {
+            const full = await client.fetchOne(msg.uid, { source: true });
+            const body = full?.source ? (await simpleParser(full.source, { skipHtmlToText: false })).text || '' : '';
+            await handleBounceNotification(from, subject, body);
+          } catch (be) {
+            console.warn('[REPLY] Bounce processing failed:', be.message);
+          }
+          continue;
+        }
 
         if (isNoReplyAddress(from))    continue;
         if (isAutoReplySubject(subject)) continue;
@@ -389,7 +422,7 @@ async function scanGmailInbox(senderEmail, matchReply) {
     const messages = listRes.data.messages || [];
     console.log(`[REPLY_SCAN_START] Gmail found ${messages.length} inbox messages`);
 
-    for (const { id } of messages) {
+      for (const { id } of messages) {
       try {
         // ── Pass 1: metadata only (cheap — headers + snippet) ────────────────
         const metaRes = await gmail.users.messages.get({
@@ -405,6 +438,18 @@ async function scanGmailInbox(senderEmail, matchReply) {
         const references = get('References').trim();
         const from       = get('From');
         const subject    = get('Subject');
+
+        // ── Bounce notification → extract & suppress, skip reply handling ─
+        if (isBounceNotification(from, subject)) {
+          try {
+            const fullRes = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+            const body = extractCleanBodyFromGmail(fullRes.data) || metaRes.data.snippet || '';
+            await handleBounceNotification(from, subject, body);
+          } catch (be) {
+            console.warn('[REPLY] Gmail bounce processing failed:', be.message);
+          }
+          continue;
+        }
 
         if (isNoReplyAddress(from))    continue;
         if (isAutoReplySubject(subject)) continue;
@@ -443,6 +488,121 @@ async function scanGmailInbox(senderEmail, matchReply) {
   }
 
   return replies;
+}
+
+// ─── Bounce-only inbox scan (IMAP senders) ─────────────────────────────────────
+async function scanSingleImapForBounces(senderAccount) {
+  const { smtp_host: host, smtp_user: user, smtp_pass: pass } = senderAccount;
+  if (!host || !user || !pass) return 0;
+
+  const client = new ImapFlow({
+    host, port: 993, secure: true,
+    auth: { user, pass },
+    logger: false,
+    tls: { rejectUnauthorized: false },
+    connectionTimeout: 15000,
+    socketTimeout: 30000,
+  });
+  client.on('error', err => {
+    console.warn(`[BOUNCE_SCAN] IMAP client error for ${user}@${host}:`, err.message);
+  });
+
+  let processed = 0;
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');
+    try {
+      const since = new Date();
+      since.setDate(since.getDate() - 7);
+      const uids = await client.search({ since });
+      for await (const msg of client.fetch(uids, { envelope: true, headers: true })) {
+        const from    = msg.envelope?.from?.[0]?.address || '';
+        const subject = msg.envelope?.subject || '';
+        if (!isBounceNotification(from, subject)) continue;
+        const full = await client.fetchOne(msg.uid, { source: true });
+        const body = full?.source ? (await simpleParser(full.source, { skipHtmlToText: false })).text || '' : '';
+        const extracted = await handleBounceNotification(from, subject, body);
+        processed += extracted.length;
+      }
+    } finally {
+      lock.release();
+    }
+  } catch (err) {
+    console.error(`[BOUNCE_SCAN] IMAP error for ${user}@${host}:`, err.message);
+  } finally {
+    await client.logout().catch(() => {});
+  }
+  return processed;
+}
+
+// ─── Bounce-only inbox scan (Gmail OAuth senders) ─────────────────────────────
+async function scanSingleGmailForBounces(senderEmail) {
+  let gmail;
+  try {
+    gmail = await getGmailService(senderEmail);
+  } catch (err) {
+    console.error(`[BOUNCE_SCAN] Gmail auth failed for ${senderEmail}:`, err.message);
+    return 0;
+  }
+
+  let processed = 0;
+  try {
+    const listRes = await gmail.users.messages.list({
+      userId: 'me', labelIds: ['INBOX'], maxResults: 100, q: 'newer_than:7d',
+    });
+    for (const { id } of (listRes.data.messages || [])) {
+      try {
+        const metaRes = await gmail.users.messages.get({
+          userId: 'me', id, format: 'metadata',
+          metadataHeaders: ['From', 'Subject'],
+        });
+        const headers = metaRes.data.payload?.headers || [];
+        const get = (name) => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+        const from    = get('From');
+        const subject = get('Subject');
+        if (!isBounceNotification(from, subject)) continue;
+        const fullRes = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+        const body = extractCleanBodyFromGmail(fullRes.data) || metaRes.data.snippet || '';
+        const extracted = await handleBounceNotification(from, subject, body);
+        processed += extracted.length;
+      } catch (e) { /* skip individual errors */ }
+    }
+  } catch (err) {
+    console.error(`[BOUNCE_SCAN] Gmail list error for ${senderEmail}:`, err.message);
+  }
+  return processed;
+}
+
+// ─── Independent bounce notification scanner ──────────────────────────────────
+async function scanBounceNotifications() {
+  try {
+    const { rows: accounts } = await pool.query(
+      `SELECT email, type, smtp_host, smtp_user, smtp_pass FROM sender_accounts WHERE 1=1`
+    );
+    if (accounts.length === 0) {
+      console.log('[BOUNCE_SCAN] No sender accounts found — skipping');
+      return;
+    }
+    console.log(`[BOUNCE_SCAN] Checking ${accounts.length} sender account(s) for bounce notifications`);
+
+    let total = 0;
+    for (const acct of accounts) {
+      if (acct.type === 'smtp' && (!acct.smtp_host || !acct.smtp_user || !acct.smtp_pass)) {
+        console.log(`[BOUNCE_SCAN] Skipping ${acct.email} — incomplete IMAP credentials`);
+        continue;
+      }
+      const count = acct.type === 'smtp'
+        ? await scanSingleImapForBounces(acct)
+        : await scanSingleGmailForBounces(acct.email);
+      if (count > 0) {
+        console.log(`[BOUNCE_SCAN] ${acct.email}: ${count} new bounce(s) processed`);
+      }
+      total += count;
+    }
+    console.log(`[BOUNCE_SCAN] Complete — ${total} total bounce(s) processed`);
+  } catch (err) {
+    console.error('[BOUNCE_SCAN] Error:', err.message);
+  }
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
@@ -486,8 +646,13 @@ async function checkReplies() {
       const senderType = acct?.type || 'gmail';
       const matchReply = buildReplyMatcher(bySender[senderEmail]);
 
-      if (senderType === 'smtp' && !acct) {
-        console.warn(`[REPLY] SMTP sender ${senderEmail} has no sender_accounts row; skipping IMAP scan`);
+      if (!acct) {
+        console.warn(`[REPLY] Sender ${senderEmail} has no sender_accounts row — skipping inbox scan (bounce/reply detection unavailable)`);
+        continue;
+      }
+
+      if (senderType === 'smtp' && (!acct.smtp_host || !acct.smtp_user || !acct.smtp_pass)) {
+        console.warn(`[REPLY] SMTP sender ${senderEmail} has incomplete IMAP credentials — skipping inbox scan`);
         continue;
       }
 
@@ -527,4 +692,4 @@ async function checkReplies() {
   }
 }
 
-module.exports = { checkReplies };
+module.exports = { checkReplies, scanBounceNotifications };

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { Card, Table, THead, TBody, Th, Tr, Td } from "components/ui";
 import { ChevronLeftIcon, ChevronRightIcon, TrashIcon } from "@heroicons/react/24/outline";
-import { deleteCampaign } from "services/api";
+import { deleteCampaign, fetchCampaigns } from "services/api";
 
 const PAGE_SIZE = 10;
 
@@ -65,11 +65,9 @@ export function CampaignsTable() {
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch("/api/campaigns/status");
-        if (!res.ok) return;
-        const data = await res.json().catch(() => null);
-        if (data?.success) {
-          setCampaigns(data.campaigns);
+        const campaigns = await fetchCampaigns();
+        if (campaigns) {
+          setCampaigns(campaigns);
           setPage(1);
         }
       } catch (err) {
@@ -154,6 +152,7 @@ export function CampaignsTable() {
                 <Th className="px-4 py-2.5 text-center">Sent</Th>
                 <Th className="px-4 py-2.5 text-center">Pending</Th>
                 <Th className="px-4 py-2.5 text-center">Failed</Th>
+                <Th className="px-4 py-2.5 text-center">Suppressed</Th>
                 <Th className="px-4 py-2.5 text-center">Progress</Th>
                 <Th className="px-4 py-2.5 text-center">Ratio</Th>
                 <Th className="px-4 py-2.5">Active Sender</Th>
@@ -163,11 +162,12 @@ export function CampaignsTable() {
             </THead>
             <TBody>
               {visible.map((c) => {
-                const total    = c.total    || 0;
-                const sent     = c.sent     || 0;
-                const failed   = c.failed   || 0;
-                const pending  = c.pending  || 0;
-                const progress = c.progress !== undefined
+                const total      = c.total      || 0;
+                const sent       = c.sent       || 0;
+                const failed     = c.failed     || 0;
+                const pending    = c.pending    || 0;
+                const suppressed = c.suppressed || 0;
+                const progress   = c.progress !== undefined
                   ? c.progress
                   : (total > 0 ? Math.round((sent / total) * 100) : 0);
 
@@ -191,6 +191,7 @@ export function CampaignsTable() {
                     <Td className="px-4 py-3 text-center text-sm font-semibold text-success tabular-nums">{sent}</Td>
                     <Td className="px-4 py-3 text-center text-sm font-semibold text-warning-600 tabular-nums">{pending}</Td>
                     <Td className="px-4 py-3 text-center text-sm font-semibold text-error tabular-nums">{failed}</Td>
+                    <Td className="px-4 py-3 text-center text-sm font-semibold text-purple-600 dark:text-purple-400 tabular-nums">{suppressed}</Td>
                     <Td className="px-4 py-3 text-center min-w-[120px]">
                       <div className="flex items-center gap-2">
                         <div className="h-2 grow overflow-hidden rounded-full bg-gray-100 dark:bg-dark-700">
@@ -227,7 +228,7 @@ export function CampaignsTable() {
               })}
               {campaigns.length === 0 && (
                 <Tr>
-                  <Td colSpan={11} className="px-4 py-10 text-center text-xs text-gray-400 italic">
+                  <Td colSpan={12} className="px-4 py-10 text-center text-xs text-gray-400 italic">
                     No campaigns yet
                   </Td>
                 </Tr>

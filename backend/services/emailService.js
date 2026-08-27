@@ -6,6 +6,7 @@ const pool = require("../db");
 const crypto = require("crypto");
 const { prepareSender, recordSuccess } = require("./senderService");
 const { generatePlainText } = require('../utils/plainText');
+const { checkSuppression, incrementSkipCount } = require('./suppression.service');
 
 const EMAIL_ASSETS_DIR = path.join(__dirname, "..", "assets", "email");
 const INLINE_IMAGES = [
@@ -401,11 +402,20 @@ function resolveSubjectForLead(rawSubject, lead) {
   return resolved;
 }
 
-async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo, references, threadId, trackingId, recipientName, senderEmail, campaignId, fromName, disableTracking = false, lead = null, queueJobId = null }) {
+async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo, references, threadId, trackingId, recipientName, senderEmail, campaignId, fromName, disableTracking = false, lead = null, queueJobId = null, userId = null }) {
   if (!to || !subject) throw new Error("sendEmail requires { to, subject }");
   if (!senderEmail) throw new Error("sendEmail requires senderEmail for multi-account support");
 
   const trimmedTo   = to.trim();
+
+  // Global Suppression Check — return a structured signal, never throw
+  const isSuppressed = await checkSuppression(trimmedTo);
+  if (isSuppressed) {
+    console.log(`[EmailService] SKIPPING: ${trimmedTo} is globally suppressed.`);
+    await incrementSkipCount(trimmedTo);
+    return { suppressed: true, recipient: trimmedTo };
+  }
+
   // Only resolve if the subject still contains template vars (worker may have already resolved it)
   const resolvedSubject = (subject && subject.includes('{{'))
     ? resolveSubjectForLead(subject, lead || { name: recipientName || '' })
@@ -491,19 +501,19 @@ async function sendEmail({ to, subject, text, html, type = "initial", inReplyTo,
   const finalTrackingId = trackingId || createTrackingId();
 
   await pool.query(
-    `INSERT INTO email_logs (lead_email, to_email, email, type, subject, status, provider, message_id, tracking_id, sender_email, queue_job_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [trimmedTo, trimmedTo, trimmedTo, type, resolvedSubject, 'sent', accountType, messageId, finalTrackingId, senderEmail, queueJobId || null]
+    `INSERT INTO email_logs (lead_email, to_email, email, type, subject, status, provider, message_id, tracking_id, sender_email, queue_job_id, user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [trimmedTo, trimmedTo, trimmedTo, type, resolvedSubject, 'sent', accountType, messageId, finalTrackingId, senderEmail, queueJobId || null, userId]
   );
   console.log(`[EMAIL_SENT] job=${queueJobId || 'direct'} campaign=${campaignId} lead=${trimmedTo} ts=${new Date().toISOString()} provider=${accountType} sender=${senderEmail}`);
 
   await pool.query(
     `INSERT INTO email_events (
       tracking_id, recipient_email, recipient_name, email_type,
-      status, opened, clicked, replied, sender_email
-    ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?)
+      status, opened, clicked, replied, sender_email, user_id
+    ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
     ON DUPLICATE KEY UPDATE tracking_id = tracking_id`,
-    [finalTrackingId, trimmedTo, recipientName || '', type || 'initial', 'sent', senderEmail]
+    [finalTrackingId, trimmedTo, recipientName || '', type || 'initial', 'sent', senderEmail, userId]
   );
 
   return { providerUsed: accountType, messageId, threadId: sentThreadId, trackingId: finalTrackingId, senderEmail };

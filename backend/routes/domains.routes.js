@@ -37,7 +37,7 @@ router.post('/api/domains/report-spam', async (req, res) => {
   try {
     const { domain } = req.body;
     if (!domain) return res.status(400).json({ error: 'domain required' });
-    await trackEvent({ domain, type: 'spam' });
+    await trackEvent({ domain, type: 'spam', user_id: req.user.id });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

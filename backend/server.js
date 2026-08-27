@@ -9,7 +9,7 @@ require('dotenv').config();
 const { getActiveSenders, resetAllLimits, getNextSender, getSenderStats, getGlobalStats } = require('./services/senderService');
 const { startWorker, triggerQueue } = require('./services/queueWorker');
 
-const { checkReplies } = require('./services/replyService');
+const { checkReplies, scanBounceNotifications } = require('./services/replyService');
 const { runReplyCheck, syncRepliedFlagsFromLeads } = require('./services/replyCheck.service');
 const { runFollowUpScheduler, markAsReplied, markAsBounced } = require('./services/followUp.service');
 const {
@@ -37,6 +37,15 @@ cron.schedule('* * * * *', async () => {
     await checkReplies();
   } catch (err) {
     console.error('[CRON] Reply check failed:', err.message);
+  }
+});
+
+// Independent Bounce Detection (Every 5 minutes)
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await scanBounceNotifications();
+  } catch (err) {
+    console.error('[CRON] Bounce scan failed:', err.message);
   }
 });
 
@@ -72,6 +81,7 @@ process.on('uncaughtException', err => {
 })
 
 const sendingState = require('./utils/sendingState');
+const bcrypt = require('bcryptjs');
 
 // Also load the root project's .env so Gmail credentials exist for Nodemailer.
 const { findPythonProjectDir } = require('./utils/pythonPath');
@@ -90,6 +100,82 @@ const {
 const { extractImageUrls, checkImageUrl, validateTemplateImages } = require('./utils/imageValidator');
 const { delay, withTimeout, nextSendDelayMs, createTrackingId, getTrackingBaseUrl, appendOpenTrackingPixel } = require('./utils/misc');
 
+const { runMigrations } = require('./utils/migrationRunner');
+
+async function runMigration() {
+  try {
+    console.log('[MIGRATION] Running database migrations...');
+    await runMigrations();
+
+    console.log('[MIGRATION] Running multi-user auth post-migration setup...');
+    const adminName     = process.env.DEFAULT_ADMIN_NAME     || 'admin';
+    const adminEmail    = process.env.DEFAULT_ADMIN_EMAIL    || 'admin@example.com';
+    const adminPassword = process.env.DEFAULT_ADMIN_PASSWORD || 'changeme';
+
+    const users = await pool.query('SELECT COUNT(*) AS cnt FROM users');
+    let defaultUserId = null;
+    if (parseInt(users.rows[0].cnt) === 0) {
+      const hash = await bcrypt.hash(adminPassword, 10);
+      const result = await pool.query(
+        'INSERT INTO users (name, email, password) VALUES (?, ?, ?)',
+        [adminName, adminEmail, hash]
+      );
+      defaultUserId = result.insertId;
+      console.log('[MIGRATION] Default user created with id:', defaultUserId);
+    } else {
+      const existing = await pool.query('SELECT id FROM users WHERE email = ?', [adminEmail]);
+      if (existing.rows.length > 0) {
+        defaultUserId = existing.rows[0].id;
+      } else {
+        const first = await pool.query('SELECT id FROM users ORDER BY id ASC LIMIT 1');
+        defaultUserId = first.rows[0].id;
+      }
+      console.log('[MIGRATION] Default user found with id:', defaultUserId);
+    }
+
+    const tables = [
+      { name: 'campaigns', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'leads', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'email_queue', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'email_logs', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'email_events', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'email_templates', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'followup_templates', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      // { name: 'followup_schedules', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'followup_logs', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'sender_accounts', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'domain_warmup', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'domain_events', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'domain_stats', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'link_clicks', key: 'user_id', ref: 'INT DEFAULT NULL', fk: true },
+      { name: 'suppression_list', key: 'user_id', ref: 'INT DEFAULT NULL', fk: false },
+    ];
+
+    for (const table of tables) {
+      const check = await pool.query(`SELECT COUNT(*) AS cnt FROM ${table.name} WHERE user_id IS NULL`);
+      if (parseInt(check.rows[0].cnt) > 0) {
+        await pool.query(`UPDATE ${table.name} SET user_id = ? WHERE user_id IS NULL`, [defaultUserId]);
+        console.log(`[MIGRATION] Assigned ${check.rows[0].cnt} records in ${table.name} to user ${defaultUserId}`);
+      }
+    }
+
+    for (const table of tables) {
+      try {
+        await pool.query(`ALTER TABLE ${table.name} MODIFY COLUMN user_id INT NOT NULL`);
+        console.log(`[MIGRATION] Set user_id NOT NULL on ${table.name}`);
+      } catch (err) {
+        console.log(`[MIGRATION] Could not set NOT NULL on ${table.name}: ${err.message}`);
+      }
+    }
+
+    console.log('[MIGRATION] Multi-user auth migration complete');
+  } catch (err) {
+    console.error('[MIGRATION] Error:', err.message);
+  }
+}
+
+runMigration();
+
 const app = express();
 const corsOrigin = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
@@ -105,8 +191,22 @@ app.use(require('./routes/system.routes'));
 // (oauth routes moved to routes/oauth.routes.js)
 app.use(require('./routes/oauth.routes'));
 
+// Multi-user auth routes
+app.use(require('./routes/auth.routes'));
+
 app.use(require('./routes/tracking.routes'));
 app.use(require('./routes/trackingExtra.routes'));
+
+const authMiddleware = require('./middleware/auth');
+// Apply auth middleware to all /api routes except public ones (auth, health, etc.)
+app.use((req, res, next) => {
+  if (!req.originalUrl.startsWith('/api/')) return next();
+  const publicPrefixes = ['/api/auth/', '/api/health'];
+  if (publicPrefixes.some(p => req.originalUrl.startsWith(p))) {
+    return next();
+  }
+  return authMiddleware(req, res, next);
+});
 
 const { upload } = require('./middleware/upload');
 
@@ -130,24 +230,7 @@ app.use(require('./routes/analytics.routes'));
 app.use(require('./routes/domains.routes'));
 app.use(require('./routes/senders.routes'));
 
-// GET /api/dashboard/automation - Daily automation metrics
-const DashboardController = require('./controllers/dashboard.controller');
-app.get('/api/dashboard/automation', DashboardController.getAutomation);
 
-// GET /api/activity/recent - Recent outreach activity
-const activityController = require('./controllers/activity.controller');
-app.get('/api/activity/recent', activityController.getRecentActivity);
-
-const campaignsController = require('./controllers/campaigns.controller');
-app.get('/api/campaigns/top', campaignsController.getTopCampaign);
-app.get('/api/campaigns', campaignsController.getCampaigns);
-app.post('/api/campaigns/:campaignId/followup/send-now', campaignsController.sendFollowUpNow);
-
-const senderController = require('./controllers/sender.controller');
-app.get('/api/senders', senderController.getSenders);
-app.get('/api/senders/stats', senderController.getSenderStats);
-app.post('/api/senders', senderController.addSender);
-app.delete('/api/senders/:email', senderController.deleteSender);
 
 
 // (analytics routes moved to routes/analytics.routes.js)
@@ -158,6 +241,7 @@ app.use(require('./routes/dashboard.routes'));
 // (lead routes moved to routes/leads.routes.js)
 app.use(require('./routes/leads.routes'));
 app.use(require('./routes/activity.routes'));
+app.use(require('./routes/suppression.routes'));
 
 // (dashboard/stats and /api/dashboard moved to routes/dashboard.routes.js)
 
@@ -183,6 +267,22 @@ app.use(require('./routes/emailDiagnostics.routes'));
 
 // (campaign status/:id/:id/leads routes moved to routes/campaigns.routes.js)
 app.use(require('./routes/campaigns.routes'));
+
+// Bulk Campaign Automation — campaign_master CRUD
+app.use('/api/campaign-automation', require('./routes/campaignAutomation.routes'));
+
+// Bulk Campaign Automation — release due batches (200/sender, senders take
+// turns one per day in rotation) into the legacy leads/email_queue pipeline.
+// Runs every 30 minutes; a sender only actually releases once its
+// next_eligible_date has arrived, so more frequent runs are safe no-ops.
+const { releaseDueBatches } = require('./services/campaignScheduling.service');
+cron.schedule('*/30 * * * *', async () => {
+  try {
+    await releaseDueBatches();
+  } catch (err) {
+    console.error('[CAMPAIGN_SCHEDULER] Cron error:', err.message);
+  }
+});
 
 // ─── Reply detection engine ─────────────────────────────────────────────────
 
@@ -244,21 +344,7 @@ app.use(require('./routes/unsubscribe.routes'));
 // Reply leads (detected leads from reply tracking)
 app.use(require('./routes/reply_leads.routes'));
 
-// ─── Email Templates CRUD ───────────────────────────────────────────────────
 
-// Ensure email_templates table exists
-pool.query(`
-  CREATE TABLE IF NOT EXISTS email_templates (
-    id           INT AUTO_INCREMENT PRIMARY KEY,
-    name         VARCHAR(500) NOT NULL,
-    html_content LONGTEXT NOT NULL,
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-  )
-`).catch(err => console.error('[TEMPLATES] Table init error:', err.message));
-
-// Ensure campaigns has template_html column
-pool.query(`ALTER TABLE campaigns ADD COLUMN template_html TEXT`).catch(() => {});
 
 // (template routes moved to routes/templates.routes.js)
 app.use(require('./routes/templates.routes'));

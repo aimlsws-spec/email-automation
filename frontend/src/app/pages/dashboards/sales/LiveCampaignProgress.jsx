@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "components/ui";
 import { PlayCircleIcon, CheckCircleIcon, UserIcon } from "@heroicons/react/24/outline";
+import { fetchCampaigns } from "services/api";
 
 export function LiveCampaignProgress() {
   const [campaigns, setCampaigns] = useState([]);
@@ -8,21 +9,8 @@ export function LiveCampaignProgress() {
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const res = await fetch("/api/campaigns/status");
-        if (!res.ok) {
-          console.error("API error fetching campaign status");
-          return;
-        }
-        
-        let data = null;
-        try {
-          data = await res.json();
-        } catch (err) {
-          console.error("Invalid JSON response in campaign status", err);
-          return;
-        }
-
-        setCampaigns(data && data.success ? data.campaigns : []);
+        const campaigns = await fetchCampaigns();
+        setCampaigns(Array.isArray(campaigns) ? campaigns : []);
       } catch (err) {
         console.error("Failed to fetch campaign status:", err);
       }
@@ -40,7 +28,7 @@ export function LiveCampaignProgress() {
 
   const sent = activeCampaign.sent || 0;
   const total = activeCampaign.total || 0;
-  const progress = total > 0 ? Math.round((sent / total) * 100) : 0;
+  const progress = activeCampaign.progress ?? (total > 0 ? Math.round((sent / total) * 100) : 0);
   const isCompleted = activeCampaign.status === 'COMPLETED';
 
   return (
@@ -73,6 +61,11 @@ export function LiveCampaignProgress() {
               </div>
               <div className="font-medium">
                 {sent} / {total} Leads
+                {activeCampaign.suppressed > 0 && (
+                  <span className="ml-2 text-xs font-semibold text-purple-500 dark:text-purple-400">
+                    · {activeCampaign.suppressed} Suppressed
+                  </span>
+                )}
               </div>
             </div>
           </div>

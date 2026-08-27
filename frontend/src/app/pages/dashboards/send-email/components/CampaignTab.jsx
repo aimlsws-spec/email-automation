@@ -4,7 +4,6 @@ import {
   ArrowUpTrayIcon,
   DocumentTextIcon,
   PaperAirplaneIcon,
-  BoltIcon,
 } from "@heroicons/react/24/outline";
 import { Card, Button } from "components/ui";
 
@@ -20,13 +19,13 @@ export function CampaignTab({
   bulkMessage,
   onUpload,
   onSend,
+  onClearUpload,
   globalStats,
 }) {
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
   const [file, setFile] = useState(null);
   const [fileBuffer, setFileBuffer] = useState(null);
-  const [followUpEnabled, setFollowUpEnabled] = useState(true);
 
   const { name, subject, sendingMode, smtpSender } = campaignData;
   const set = (key) => (e) =>
@@ -62,6 +61,13 @@ export function CampaignTab({
     reader.readAsArrayBuffer(f);
   }
 
+  function removeUpload() {
+    // Clear local file selection and notify parent to clear upload state
+    setFile(null);
+    setFileBuffer(null);
+    if (typeof onClearUpload === 'function') onClearUpload();
+  }
+
   const canUpload = file && fileBuffer && uploadStatus !== "loading" && name && subject;
   const canSend =
     pendingCount > 0 &&
@@ -92,42 +98,6 @@ export function CampaignTab({
               className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm focus:border-primary-500 focus:ring-1 focus:ring-primary-500 dark:border-dark-500 dark:bg-dark-800 dark:text-dark-100"
             />
           </div>
-
-          {/* Automated Follow-Up Toggle */}
-          <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 dark:border-dark-600 dark:bg-dark-800">
-            <div className="flex items-center gap-2">
-              <BoltIcon className="size-4 text-primary-500" />
-              <div>
-                <p className="text-sm font-medium text-gray-800 dark:text-dark-100">Automated Follow-Ups</p>
-                <p className="text-xs text-gray-400 dark:text-dark-400">7 stages over 30 days · stops on reply/unsubscribe</p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setFollowUpEnabled((v) => !v)}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                followUpEnabled ? "bg-primary-600" : "bg-gray-300 dark:bg-dark-500"
-              }`}
-            >
-              <span className={`pointer-events-none inline-block size-5 transform rounded-full bg-white shadow transition duration-200 ${
-                followUpEnabled ? "translate-x-5" : "translate-x-0"
-              }`} />
-            </button>
-          </div>
-
-          {followUpEnabled && (
-            <div className="rounded-lg border border-primary-200 bg-primary-50 px-4 py-3 dark:border-primary-800 dark:bg-primary-900/20">
-              <p className="mb-2 text-xs font-semibold text-primary-700 dark:text-primary-400">Schedule Preview</p>
-              <div className="flex flex-wrap gap-1.5">
-                {[{day:1,t:"FU1"},{day:3,t:"FU2"},{day:7,t:"FU1"},{day:11,t:"FU2"},{day:15,t:"FU1"},{day:20,t:"FU2"},{day:25,t:"FU1"}].map(({day,t}) => (
-                  <span key={day} className="rounded bg-primary-100 px-2 py-0.5 text-[10px] font-semibold text-primary-700 dark:bg-primary-800/40 dark:text-primary-300">
-                    Day {day} · {t}
-                  </span>
-                ))}
-                <span className="rounded bg-error-100 px-2 py-0.5 text-[10px] font-semibold text-error dark:bg-error-900/30">Day 30 · STOP</span>
-              </div>
-            </div>
-          )}
 
           <div>
             <label className="mb-1.5 block text-sm font-medium text-gray-800 dark:text-dark-100">
@@ -171,15 +141,22 @@ export function CampaignTab({
               className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 bg-gray-50 py-8 transition-colors hover:border-primary-400 hover:bg-primary-50 dark:border-dark-500 dark:bg-dark-800 dark:hover:border-primary-500"
             >
               <DocumentTextIcon className="size-10 text-gray-400 dark:text-dark-400" />
-              {file ? (
-                <p className="text-sm font-medium text-primary-600 dark:text-primary-400">
-                  {file.name}
-                </p>
-              ) : (
-                <p className="text-sm text-gray-500 dark:text-dark-300">
-                  Click to select a CSV or Excel file
-                </p>
-              )}
+                {file ? (
+                  <div className="flex items-center gap-3">
+                    <p className="text-sm font-medium text-primary-600 dark:text-primary-400">{file.name}</p>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); removeUpload(); }}
+                      className="text-xs text-gray-500 hover:text-gray-700 dark:text-dark-300"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500 dark:text-dark-300">
+                    Click to select a CSV or Excel file
+                  </p>
+                )}
               <p className="text-xs text-gray-400 dark:text-dark-400">
                 .csv, .xlsx, .xls — max 5 MB
               </p>

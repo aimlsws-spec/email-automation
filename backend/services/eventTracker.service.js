@@ -59,6 +59,7 @@ async function ensureTables() {
       domain      VARCHAR(255) NOT NULL,
       event_type  VARCHAR(100) NOT NULL,
       metadata    JSON,
+      user_id     INT DEFAULT NULL,
       created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -67,6 +68,7 @@ async function ensureTables() {
   const eventsColumns = [
     { col: 'event_type', def: "VARCHAR(100) NOT NULL DEFAULT ''" },
     { col: 'metadata',   def: 'JSON' },
+    { col: 'user_id',    def: 'INT DEFAULT NULL' },
   ];
   for (const { col, def } of eventsColumns) {
     const exists = await colExistsIn('domain_events', col);
@@ -80,6 +82,8 @@ async function ensureTables() {
   await pool.query(`ALTER TABLE domain_events ADD INDEX idx_domain_events_domain (domain)`).catch(() => {});
   await pool.query(`ALTER TABLE domain_events ADD INDEX idx_domain_events_event_type (event_type)`).catch(() => {});
   await pool.query(`ALTER TABLE domain_events ADD INDEX idx_domain_events_created_at (created_at)`).catch(() => {});
+  // Ensure user_id is nullable — migration may have set NOT NULL but INSERTs may not always have it
+  await pool.query(`ALTER TABLE domain_events MODIFY COLUMN user_id INT DEFAULT NULL`).catch(() => {});
 
   migrated = true;
 }
@@ -137,13 +141,13 @@ async function incrementDomainStats(domain, eventType) {
   }
 }
 
-async function trackEvent({ lead_email, campaign_id, domain, type, metadata = {} }) {
+async function trackEvent({ lead_email, campaign_id, domain, type, metadata = {}, user_id = null }) {
   if (!domain || !type) return;
   await ensureTables();
   try {
     await pool.query(
-      `INSERT INTO domain_events (lead_email, campaign_id, domain, event_type, metadata) VALUES (?, ?, ?, ?, ?)`,
-      [lead_email || null, campaign_id || null, domain, type, JSON.stringify(metadata)]
+      `INSERT INTO domain_events (lead_email, campaign_id, domain, event_type, metadata, user_id) VALUES (?, ?, ?, ?, ?, ?)`,
+      [lead_email || null, campaign_id || null, domain, type, JSON.stringify(metadata), user_id]
     );
     await incrementDomainStats(domain, type);
   } catch (err) {

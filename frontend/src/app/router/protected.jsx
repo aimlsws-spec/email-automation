@@ -71,6 +71,29 @@ const protectedRoutes = {
                 Component: (await import("app/pages/dashboards/followup-queue")).default,
               }),
             },
+            {
+              path: "suppressions",
+              lazy: async () => ({
+                Component: (await import("app/pages/dashboards/suppressions")).default,
+              }),
+            },
+            {
+              path: "auto-campaigns",
+              children: [
+                {
+                  index: true,
+                  lazy: async () => ({
+                    Component: (await import("app/pages/dashboards/auto-campaigns")).default,
+                  }),
+                },
+                {
+                  path: ":id",
+                  lazy: async () => ({
+                    Component: (await import("app/pages/dashboards/auto-campaigns/CampaignDetail")).default,
+                  }),
+                },
+              ],
+            },
             // { path: "crm-analytics", lazy: async () => ({ Component: (await import("app/pages/dashboards/crm-analytics")).default }) },
             // { path: "orders", lazy: async () => ({ Component: (await import("app/pages/dashboards/orders")).default }) },
             // { path: "crypto/crypto-1", lazy: async () => ({ Component: (await import("app/pages/dashboards/crypto-1")).default }) },

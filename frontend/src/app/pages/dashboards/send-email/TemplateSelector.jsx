@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { PlusIcon, TrashIcon, ArrowPathIcon } from "@heroicons/react/24/outline";
 import { fetchTemplates, deleteTemplate } from "services/api";
 
@@ -23,9 +24,13 @@ export function TemplateSelector({ selectedId, onSelect, onNew, refreshTrigger }
   async function handleDelete(e, id) {
     e.stopPropagation();
     if (!confirm("Delete this template?")) return;
-    await deleteTemplate(id);
-    if (selectedId === id) onSelect(null);
-    load();
+    try {
+      await deleteTemplate(id);
+      if (selectedId === id) onSelect(null);
+      load();
+    } catch (err) {
+      toast.error(err.message || "Failed to delete template");
+    }
   }
 
   return (
@@ -83,13 +88,15 @@ export function TemplateSelector({ selectedId, onSelect, onNew, refreshTrigger }
                   {isText ? "TEXT" : "HTML"}
                 </span>
 
-                <button
-                  onClick={(e) => handleDelete(e, t.id)}
-                  className="ml-2 shrink-0 rounded p-0.5 text-gray-300 opacity-0 transition-opacity hover:text-error group-hover:opacity-100 dark:text-dark-500"
-                  title="Delete template"
-                >
-                  <TrashIcon className="size-3.5" />
-                </button>
+                {!t.is_protected && (
+                  <button
+                    onClick={(e) => handleDelete(e, t.id)}
+                    className="ml-2 shrink-0 rounded p-0.5 text-gray-300 opacity-0 transition-opacity hover:text-error group-hover:opacity-100 dark:text-dark-500"
+                    title="Delete template"
+                  >
+                    <TrashIcon className="size-3.5" />
+                  </button>
+                )}
               </div>
             );
           })}

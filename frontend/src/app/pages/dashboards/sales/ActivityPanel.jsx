@@ -6,6 +6,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
 } from "@heroicons/react/24/outline";
+import { getJSON } from "services/api";
 
 const PAGE_SIZE = 10;
 
@@ -107,8 +108,8 @@ export function ActivityPanel() {
     const load = async () => {
       try {
         const [cRes, uRes] = await Promise.all([
-          fetch("/api/analytics/link-activity").then((r) => r.json()),
-          fetch("/api/analytics/unsubscribes").then((r) => r.json()),
+          getJSON("/api/analytics/link-activity"),
+          getJSON("/api/analytics/unsubscribes"),
         ]);
         const sortByClicked = (arr) =>
           (arr || []).sort((a, b) => new Date(b.clicked_at) - new Date(a.clicked_at));

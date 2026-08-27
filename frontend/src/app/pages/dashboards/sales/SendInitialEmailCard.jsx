@@ -84,7 +84,6 @@ export function SendInitialEmailCard() {
       <div className="mt-6">
         <Button
           unstyled
-          disabled={!hasActiveSenders || isCapacityFull}
           className="w-full gap-2 rounded-xl bg-white px-5 py-3 text-sm font-black text-primary-600 transition-all hover:bg-opacity-90 disabled:bg-white/20 disabled:text-white/40"
           onClick={() => navigate("/dashboards/send-email")}
         >

@@ -29,7 +29,7 @@ async function syncRepliedFlagsFromLeads() {
     await ensureEmailEventsTable();
     await pool.query(`
       UPDATE email_events e
-      JOIN leads l ON l.email = e.recipient_email
+      JOIN leads l ON l.email = e.recipient_email AND l.sender_email = e.sender_email
       SET e.replied = 1,
           e.status = 'replied'
       WHERE l.reply_detected_at IS NOT NULL

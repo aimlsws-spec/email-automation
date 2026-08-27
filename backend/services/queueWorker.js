@@ -2,22 +2,14 @@ const pool = require('../db');
 const { sendEmail, injectVariables, resolveSubjectForLead } = require('./emailService');
 const { canSendEmail, incrementSenderCount, domainFromEmail } = require('./senderWarmup.service');
 const { isUnsubscribed } = require('./unsubscribe.service');
+const { isHardBounce, recordSuppression, classifyFailure } = require('./suppression.service');
 const { generatePlainText } = require('../utils/plainText');
 const { scheduleNextFollowUp, scheduleInitialFollowUp } = require('./followUp.service');
 const { trackEvent } = require('./eventTracker.service');
 const { recalculateCampaignStats } = require('./campaignStats.service');
-const { scheduleLinkedFollowUps } = require('./campaignFollowUp.service');
+const { scheduleLinkedFollowUps, getCampaignFollowUpTemplates, syncFollowUpQueueAfterSend } = require('./campaignFollowUp.service');
 const { getAutomationEnabled } = require('./systemSettings.service');
-
-pool.query(`ALTER TABLE email_queue ADD COLUMN type VARCHAR(100) DEFAULT 'initial'`).catch(() => {});
-pool.query(`ALTER TABLE email_queue ADD COLUMN sending_mode VARCHAR(50) DEFAULT 'domain'`).catch(() => {});
-pool.query(`ALTER TABLE campaigns ADD COLUMN sending_type VARCHAR(50) DEFAULT 'domain'`).catch(() => {});
-pool.query(`ALTER TABLE campaigns ADD COLUMN gmail_accounts JSON`).catch(() => {});
-pool.query(`ALTER TABLE campaigns ADD COLUMN domain_accounts JSON`).catch(() => {});
-pool.query(`ALTER TABLE campaigns ADD COLUMN from_name VARCHAR(255) DEFAULT NULL`).catch(() => {});
-pool.query(`ALTER TABLE campaigns ADD COLUMN followup_enabled TINYINT(1) DEFAULT 1`).catch(() => {});
-pool.query(`ALTER TABLE email_logs ADD COLUMN queue_job_id INT DEFAULT NULL`).catch(() => {});
-pool.query(`ALTER TABLE email_logs ADD INDEX idx_email_logs_job_id (queue_job_id)`).catch(() => {});
+const { normalizedStatus, isCampaignFollowUpPaused, logFollowUpCheck } = require('../utils/followUpHelpers');
 
 const MIN_DELAY_MS = 12000;       // 12 s minimum between batches
 const MAX_DELAY_MS = 18000;       // 18 s maximum between batches
@@ -32,25 +24,6 @@ function batchDelayMs() {
   return randomBetween(MIN_DELAY_MS, MAX_DELAY_MS);
 }
 
-function normalizedStatus(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function isCampaignFollowUpPaused(campaignRow) {
-  if (campaignRow?.followup_enabled === 0 || campaignRow?.followup_enabled === false) return true;
-  return ['paused', 'archived', 'stopped', 'cancelled', 'canceled'].includes(normalizedStatus(campaignRow?.status));
-}
-
-function logFollowUpCheck(job, campaignRow, automationEnabled, isSelected) {
-  const followupStatus = campaignRow?.followup_enabled === 0 || campaignRow?.followup_enabled === false
-    ? 'paused'
-    : normalizedStatus(campaignRow?.status) || 'active';
-
-  console.log(
-    `[FOLLOWUP_CHECK] campaign_id=${job.campaign_id} campaign_name=${JSON.stringify(campaignRow?.name || '')} ` +
-    `automation_status=${automationEnabled ? 'active' : 'paused'} followup_status=${followupStatus} is_selected=${isSelected}`
-  );
-}
 
 async function leaveQueuedFollowUpPending(job, reason) {
   console.log(`[FOLLOWUP_SKIP] campaign_id=${job.campaign_id} reason=${reason}`);
@@ -67,6 +40,7 @@ async function leaveQueuedFollowUpPending(job, reason) {
 
 async function processJob(job) {
   try {
+    console.log(`[QUEUE_EXECUTION] Executing: id=${job.id} lead=${job.lead_email} campaign=${job.campaign_id} type=${job.type}`);
     if (!job.campaign_id) throw new Error('campaign_id missing in job');
 
     // Bail early if the recipient has unsubscribed — skip without counting as failure
@@ -78,9 +52,12 @@ async function processJob(job) {
         [job.id]
       );
       await pool.query(
-        `UPDATE leads SET status = 'Unsubscribed' WHERE email = ? AND status != 'Unsubscribed'`,
-        [job.lead_email]
+        `UPDATE leads SET status = 'Unsubscribed' WHERE email = ? AND campaign_id = ? AND status != 'Unsubscribed'`,
+        [job.lead_email, job.campaign_id]
       );
+      if (job.campaign_id) {
+        await recalculateCampaignStats(job.campaign_id).catch(e => console.error('[WORKER] stats recalculation after unsubscribe skip failed:', e.message));
+      }
       return { blocked: false };
     }
 
@@ -155,13 +132,15 @@ async function processJob(job) {
     const disableTracking = parseInt(sentCountRow?.cnt ?? 0) < 20;
 
     let { rows: leadRows } = await pool.query(
-      `SELECT email, status, follow_up_step, message_id, thread_id, name, company, sender_email, campaign_id
+      `SELECT email, status, follow_up_step, follow_up_count, message_id, thread_id, name, company,
+              sender_email, campaign_id, has_replied, is_bounced, unsubscribed, followup_enabled
        FROM leads WHERE email = ? AND campaign_id = ? LIMIT 1`,
       [job.lead_email, job.campaign_id]
     );
     if (leadRows.length === 0) {
       const fallback = await pool.query(
-        `SELECT email, status, follow_up_step, message_id, thread_id, name, company, sender_email, campaign_id
+        `SELECT email, status, follow_up_step, follow_up_count, message_id, thread_id, name, company,
+                sender_email, campaign_id, has_replied, is_bounced, unsubscribed, followup_enabled
          FROM leads WHERE email = ? LIMIT 1`,
         [job.lead_email]
       );
@@ -180,6 +159,28 @@ async function processJob(job) {
 
       if (!automationEnabled || isCampaignFollowUpPaused(campaignRow)) {
         await leaveQueuedFollowUpPending(job, 'paused');
+        return { blocked: false };
+      }
+
+      if (lead?.has_replied || lead?.is_bounced || lead?.unsubscribed || lead?.followup_enabled === 0) {
+        const reason = lead?.has_replied ? 'reply_received' : lead?.is_bounced ? 'bounced' : lead?.unsubscribed ? 'unsubscribed' : 'disabled';
+        await pool.query(
+          `UPDATE followup_queue SET status = 'stopped', stopped_reason = ? WHERE lead_email = ? AND campaign_id = ? AND status = 'pending'`,
+          [reason, job.lead_email, job.campaign_id]
+        ).catch(() => {});
+        await pool.query(
+          `UPDATE email_queue SET status = 'sent', last_error = ?, updated_at = NOW() WHERE id = ?`,
+          [`followup_${reason}_skip`, job.id]
+        ).catch(() => {});
+        return { blocked: false };
+      }
+
+      if (job.type === 'manual_followup' && job.followup_stage && Number(lead?.follow_up_step || 0) >= Number(job.followup_stage)) {
+        console.log(`[WORKER] job=${job.id} SKIP duplicate manual follow-up stage=${job.followup_stage} for ${job.lead_email}`);
+        await pool.query(
+          `UPDATE email_queue SET status = 'sent', last_error = 'duplicate_stage_skipped', updated_at = NOW() WHERE id = ?`,
+          [job.id]
+        );
         return { blocked: false };
       }
     }
@@ -215,7 +216,7 @@ async function processJob(job) {
       }
     }
 
-    const rawSubject = campaignRow.subject || job.subject;
+    const rawSubject = isFollowUpJob ? (job.subject || campaignRow.subject) : (campaignRow.subject || job.subject);
     if (!rawSubject) throw new Error(`No subject found for campaign ${job.campaign_id}`);
 
     console.log(`[SUBJECT_STAGE] stage="queueWorker.leadFetched" lead_email="${job.lead_email}" lead_name="${lead?.name || '(none)'}"`);
@@ -229,19 +230,24 @@ async function processJob(job) {
     console.log(`[SUBJECT_STAGE] stage="queueWorker.afterResolve" subject="${emailSubject}"`);
 
     if (isFollowUpJob) {
-      const baseSubject = resolveSubjectForLead(campaignRow.subject || job.subject || '', lead || { name: '', email: job.lead_email });
+      const baseSubject = resolveSubjectForLead(job.subject || campaignRow.subject || '', lead || { name: '', email: job.lead_email });
       emailSubject = baseSubject.startsWith('Re:') ? baseSubject : `Re: ${baseSubject}`;
       console.log(`[SUBJECT_STAGE] stage="queueWorker.followupSubject" subject="${emailSubject}"`);
     }
 
     if (isFollowUpJob) {
-      const { rows: already } = await pool.query(
-        `SELECT id FROM email_queue WHERE lead_email = ? AND type = ? AND status = 'sent' LIMIT 1`,
-        [job.lead_email, job.type]
-      );
-      if (already.length > 0) {
-        await pool.query(`UPDATE email_queue SET status = 'sent', last_error = 'duplicate_skipped', updated_at = NOW() WHERE id = ?`, [job.id]);
-        return { blocked: false };
+      if (job.followup_stage) {
+        const { rows: already } = await pool.query(
+          `SELECT id FROM email_queue
+           WHERE lead_email = ? AND campaign_id = ? AND type = ? AND followup_stage = ?
+             AND status = 'sent' AND id <> ?
+           LIMIT 1`,
+          [job.lead_email, job.campaign_id, job.type, job.followup_stage, job.id]
+        );
+        if (already.length > 0) {
+          await pool.query(`UPDATE email_queue SET status = 'sent', last_error = 'duplicate_stage_skipped', updated_at = NOW() WHERE id = ?`, [job.id]);
+          return { blocked: false };
+        }
       }
     }
 
@@ -285,22 +291,101 @@ async function processJob(job) {
       references: isFollowUpJob ? (lead?.message_id || undefined) : undefined,
       type: job.type || 'initial',
       queueJobId: job.id,
+      userId: job.user_id,
     });
 
-    await incrementSenderCount(senderEmail);
+    // ── Global suppression — intentional skip, not a failure ──────────────
+    if (result && result.suppressed) {
+      console.log(
+        `[SUPPRESSION]\n` +
+        `  Recipient:    ${job.lead_email}\n` +
+        `  Campaign:     ${job.campaign_id}\n` +
+        `  Reason:       Already exists in Global Suppression List\n` +
+        `  Action:       Skipped\n` +
+        `  Lead Status:  Suppressed`
+      );
+      await pool.query(
+        `UPDATE email_queue SET status = 'sent', last_error = 'global_suppression_skip', updated_at = NOW() WHERE id = ?`,
+        [job.id]
+      ).catch(() => {});
+      await pool.query(
+        `UPDATE leads SET status = 'Suppressed', next_follow_up_at = NULL, last_activity_at = NOW() WHERE email = ? AND campaign_id = ?`,
+        [job.lead_email, job.campaign_id]
+      ).catch(() => {});
+      if (job.campaign_id) {
+        await recalculateCampaignStats(job.campaign_id).catch(e => console.error('[WORKER] stats recalculation after suppression skip failed:', e.message));
+      }
+      return { blocked: false };
+    }
+
+    if (job.type === 'manual_followup') {
+      const manualStage = Number(job.followup_stage || (lead?.follow_up_step ?? 0) + 1);
+      const manualCampaignTemplateId = job.campaign_template_id || campaignRow.initial_template_id;
+      const syncResult = await syncFollowUpQueueAfterSend({
+        leadEmail: job.lead_email,
+        campaignId: job.campaign_id,
+        campaignTemplateId: manualCampaignTemplateId,
+        followupTemplateId: job.followup_template_id || null,
+        followupStage: manualStage,
+        queueJobId: job.id,
+        messageId: result.messageId,
+        threadId: result.threadId,
+        subject: emailSubject,
+        senderEmail,
+      });
+
+      console.log(
+        `[FOLLOWUP_SYNC] manual lead=${job.lead_email} campaign=${job.campaign_id} ` +
+        `completedStage=${syncResult.completedStage} nextStage=${syncResult.nextStage || 'none'}`
+      );
+
+      await incrementSenderCount(senderEmail).catch(e =>
+        console.error('[WORKER] incrementSenderCount failed:', e.message)
+      );
+      await recalculateCampaignStats(job.campaign_id, senderEmail).catch(e =>
+        console.error('[WORKER] recalculateCampaignStats failed:', e.message)
+      );
+      await pool.query(
+        `INSERT INTO email_events (tracking_id, recipient_email, recipient_name, email_type, status, opened, clicked, replied, sender_email, user_id)
+         VALUES (?, ?, ?, ?, 'sent', 0, 0, 0, ?, ?)
+         ON DUPLICATE KEY UPDATE tracking_id = tracking_id`,
+        [result.trackingId || result.messageId || `${job.lead_email}-${Date.now()}`,
+         job.lead_email, (lead?.name) || '', job.type || 'manual_followup', senderEmail, job.user_id]
+      ).catch(() => {});
+      await trackEvent({ lead_email: job.lead_email, campaign_id: job.campaign_id, domain, type: 'sent', user_id: job.user_id }).catch(() => {});
+
+      return { blocked: false };
+    }
+
+    // ── Post-send bookkeeping ───────────────────────────────────────────────
+    // Each operation has its own error handler so one failure never skips others.
+    // CRITICAL: the email_queue status must always be updated to 'sent' so
+    // the job is not retried — outer catch would incorrectly mark as Bounced.
+
+    await pool.query(
+      `UPDATE email_queue SET status = 'sent', last_error = NULL, updated_at = NOW() WHERE id = ?`,
+      [job.id]
+    ).catch(e => console.error('[WORKER] email_queue status update failed:', e.message));
+    console.log(`[WORKER] job=${job.id} campaign=${job.campaign_id} recipient=${job.lead_email} sender=${senderEmail} send_status=sent`);
+    console.log(`[QUEUE_EXECUTION] Completed: id=${job.id} lead=${job.lead_email} campaign=${job.campaign_id}`);
+    await incrementSenderCount(senderEmail).catch(e =>
+      console.error('[WORKER] incrementSenderCount failed:', e.message)
+    );
 
     const currentStep = lead?.follow_up_step ?? 0;
     if (isFollowUpJob) {
-      await scheduleNextFollowUp(job.lead_email, currentStep, result.messageId, result.threadId);
+      await scheduleNextFollowUp(job.lead_email, currentStep, result.messageId, result.threadId, job.campaign_id).catch(e =>
+        console.error('[WORKER] scheduleNextFollowUp failed:', e.message)
+      );
     }
 
     if (!isFollowUpJob) {
       await pool.query(
         `INSERT INTO leads (
            email, name, company, campaign_id, status, last_sent_date, message_id, thread_id,
-           sender_email, last_activity_at, last_subject, created_at
+           sender_email, last_activity_at, last_subject, created_at, user_id
          )
-         VALUES (?, ?, ?, ?, 'Sent', NOW(), ?, ?, ?, NOW(), ?, NOW())
+         VALUES (?, ?, ?, ?, 'Sent', NOW(), ?, ?, ?, NOW(), ?, NOW(), ?)
          ON DUPLICATE KEY UPDATE
            campaign_id      = VALUES(campaign_id),
            status           = 'Sent',
@@ -310,63 +395,175 @@ async function processJob(job) {
            sender_email     = VALUES(sender_email),
            last_activity_at = NOW(),
            last_subject     = VALUES(last_subject)`,
-        [job.lead_email, lead?.name || '', lead?.company || '', job.campaign_id, result.messageId, result.threadId, senderEmail, emailSubject]
-      );
+        [job.lead_email, lead?.name || '', lead?.company || '', job.campaign_id, result.messageId, result.threadId, senderEmail, emailSubject, job.user_id]
+      ).catch(e => console.error('[WORKER] leads insert failed:', e.message));
       console.log(`[LEAD_SYNC] campaign=${job.campaign_id} recipient=${job.lead_email} sender=${senderEmail} status=Sent action=${lead ? 'updated' : 'created'}`);
-      const automationEnabled = await getAutomationEnabled();
+      const automationEnabled = await getAutomationEnabled().catch(() => true);
       logFollowUpCheck(job, campaignRow, automationEnabled, false);
-      if (automationEnabled && !isCampaignFollowUpPaused(campaignRow)) {
-        // Schedule the automated 30-day follow-up sequence
-        await scheduleInitialFollowUp(job.lead_email, result.messageId, result.threadId, new Date()).catch(err =>
-          console.error('[WORKER] scheduleInitialFollowUp failed:', err.message)
-        );
-        // Schedule campaign-linked follow-ups (if this campaign template has any configured)
-        if (campaignRow.initial_template_id) {
-          await scheduleLinkedFollowUps(job.lead_email, job.campaign_id, campaignRow.initial_template_id, new Date()).catch(err =>
-            console.error('[WORKER] scheduleLinkedFollowUps failed:', err.message)
+      console.log(`[FOLLOWUP_CREATE] Triggering follow-up schedule for lead=${job.lead_email} campaign=${job.campaign_id} initial_template_id=${campaignRow.initial_template_id}`);
+
+      let shouldScheduleLegacyFollowUp = false;
+      if (campaignRow.initial_template_id) {
+        const linkedTemplates = await getCampaignFollowUpTemplates(campaignRow.initial_template_id).catch(err => {
+          console.error('[WORKER] getCampaignFollowUpTemplates failed:', err.message);
+          return [];
+        });
+        if (Array.isArray(linkedTemplates) && linkedTemplates.length > 0) {
+          shouldScheduleLegacyFollowUp = true;
+        } else {
+          console.log(
+            `[FOLLOWUP_SKIP] Campaign=${job.campaign_id} Lead=${job.lead_email} Reason=No linked follow-up templates configured for template ${campaignRow.initial_template_id}. Legacy next_follow_up_at scheduling skipped.`
           );
         }
+      }
+
+      if (shouldScheduleLegacyFollowUp) {
+        try {
+          await scheduleInitialFollowUp(job.lead_email, result.messageId, result.threadId, new Date(), job.campaign_id);
+          console.log(`[FOLLOWUP_CREATE] scheduleInitialFollowUp executed for ${job.lead_email}`);
+        } catch (err) {
+          console.error('[WORKER] scheduleInitialFollowUp failed:', err.message);
+        }
+      }
+
+      if (campaignRow.initial_template_id) {
+        try {
+          await scheduleLinkedFollowUps(job.lead_email, job.campaign_id, campaignRow.initial_template_id, new Date());
+          console.log(`[FOLLOWUP_CREATE] scheduleLinkedFollowUps executed for ${job.lead_email} using template ${campaignRow.initial_template_id}`);
+        } catch (err) {
+          console.error('[WORKER] scheduleLinkedFollowUps failed:', err.message);
+        }
       } else {
-        console.log(`[FOLLOWUP_SKIP] campaign_id=${job.campaign_id} reason=paused`);
+        console.warn(`[FOLLOWUP_CREATE] No initial_template_id on campaign ${job.campaign_id}; linked follow-ups not created.`);
       }
     } else {
       await pool.query(
         `UPDATE leads
          SET campaign_id = ?, status = ?, follow_up_count = follow_up_count + 1,
              last_sent_date = NOW(), last_activity_at = NOW(), sender_email = ?
-         WHERE email = ?`,
-        [job.campaign_id, `Follow-up ${currentStep + 1}`, senderEmail, job.lead_email]
-      );
+         WHERE email = ? AND campaign_id = ?`,
+        [job.campaign_id, `Follow-up ${currentStep + 1}`, senderEmail, job.lead_email, job.campaign_id]
+      ).catch(e => console.error('[WORKER] leads update failed:', e.message));
       console.log(`[LEAD_SYNC] campaign=${job.campaign_id} recipient=${job.lead_email} sender=${senderEmail} status=Follow-up ${currentStep + 1} action=updated`);
     }
 
-    await pool.query(`UPDATE email_queue SET status = 'sent', last_error = NULL, updated_at = NOW() WHERE id = ?`, [job.id]);
-    console.log(`[WORKER] job=${job.id} campaign=${job.campaign_id} recipient=${job.lead_email} sender=${senderEmail} send_status=sent`);
-
-    await recalculateCampaignStats(job.campaign_id, senderEmail);
+    await recalculateCampaignStats(job.campaign_id, senderEmail).catch(e =>
+      console.error('[WORKER] recalculateCampaignStats failed:', e.message)
+    );
 
     console.log(`[SUCCESS] Sent: ${job.lead_email} via ${senderEmail}`);
 
     await pool.query(
-      `INSERT INTO email_events (tracking_id, recipient_email, recipient_name, email_type, status, opened, clicked, replied, sender_email)
-       VALUES (?, ?, ?, ?, 'sent', 0, 0, 0, ?)
+      `INSERT INTO email_events (tracking_id, recipient_email, recipient_name, email_type, status, opened, clicked, replied, sender_email, user_id)
+       VALUES (?, ?, ?, ?, 'sent', 0, 0, 0, ?, ?)
        ON DUPLICATE KEY UPDATE tracking_id = tracking_id`,
       [result.trackingId || result.messageId || `${job.lead_email}-${Date.now()}`,
-       job.lead_email, (lead?.name) || '', job.type || 'initial', senderEmail]
+       job.lead_email, (lead?.name) || '', job.type || 'initial', senderEmail, job.user_id]
     ).catch(() => {});
 
-    await trackEvent({ lead_email: job.lead_email, campaign_id: job.campaign_id, domain, type: 'sent' }).catch(() => {});
+      await trackEvent({ lead_email: job.lead_email, campaign_id: job.campaign_id, domain, type: 'sent', user_id: job.user_id }).catch(() => {});
 
     return { blocked: false };
 
   } catch (err) {
     console.error(`[WORKER] FAILED: ${job.lead_email}`, err.message);
     const isBlock = err.message.includes('BLOCK');
-    await pool.query(
-      `UPDATE email_queue SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = NOW(), scheduled_at = NOW() + INTERVAL 5 MINUTE WHERE id = ?`,
-      [isBlock ? 'pending' : 'failed', err.message, job.id]
+
+    const smtpCode    = String(err.responseCode || err.code || '').trim();
+    const fullMsg     = String(err.response    || err.message || '');
+    const failureSender = job.sender_email || null;
+
+    // ── Classify the failure before taking any action ───────────────────────────
+    const failureType = isBlock ? 'BLOCK' : classifyFailure(err);
+    const shouldSuppress = failureType === 'HARD_BOUNCE';
+
+    console.log(
+      `[EMAIL_FAILURE]\n` +
+      `  Recipient:      ${job.lead_email}\n` +
+      `  Campaign:       ${job.campaign_id}\n` +
+      `  Sender:         ${failureSender || 'unknown'}\n` +
+      `  SMTP Code:      ${smtpCode || '(none)'}\n` +
+      `  SMTP Response:  ${fullMsg.slice(0, 200)}\n` +
+      `  Error Code:     ${err.code || '(none)'}\n` +
+      `  Failure Type:   ${failureType}\n` +
+      `  Classification: ${failureType}\n` +
+      `  ShouldSuppress: ${shouldSuppress}\n` +
+      `  Reason:         ${shouldSuppress ? 'Recipient hard bounce — permanent delivery failure' : 'Sender/transport/app error — recipient not at fault'}`
     );
-    return { blocked: isBlock };
+
+    if (isBlock) {
+      // BLOCK_ACCOUNT / BLOCK_GLOBAL — already handled upstream, just reschedule
+      await pool.query(
+        `UPDATE email_queue SET status = 'pending', attempts = attempts + 1, last_error = ?, updated_at = NOW(), scheduled_at = NOW() + INTERVAL 5 MINUTE WHERE id = ?`,
+        [err.message, job.id]
+      );
+      return { blocked: true };
+    }
+
+    if (failureType === 'HARD_BOUNCE') {
+      // ── Genuine recipient rejection — suppress and mark bounced ─────────────
+      console.log(`[BOUNCE] HARD_BOUNCE confirmed for ${job.lead_email} code=${smtpCode}`);
+      await recordSuppression(job.lead_email, {
+        reason: 'Hard Bounce',
+        bounceType: 'Hard Bounce',
+        smtpCode,
+        failureReason: fullMsg.slice(0, 500),
+        campaignId: job.campaign_id,
+        senderAccount: failureSender,
+      }).catch(e => console.error('[BOUNCE] recordSuppression error:', e.message));
+      await pool.query(
+        `UPDATE leads SET status = 'Bounced', is_bounced = 1, next_follow_up_at = NULL, last_activity_at = NOW() WHERE email = ? AND campaign_id = ?`,
+        [job.lead_email, job.campaign_id]
+      ).catch(() => {});
+      await pool.query(
+        `INSERT INTO email_logs (lead_email, to_email, email, type, subject, status, provider, message_id, tracking_id, sender_email, queue_job_id, user_id)
+         VALUES (?, ?, ?, ?, ?, 'bounced', ?, ?, '', ?, ?, ?)`,
+        [job.lead_email, job.lead_email, job.lead_email, job.type || 'initial', job.subject || '', 'smtp', smtpCode || 'unknown', failureSender || '', job.id, job.user_id]
+      ).catch(() => {});
+      await pool.query(
+        `UPDATE email_queue SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = NOW() WHERE id = ?`,
+        [fullMsg.slice(0, 500), job.id]
+      );
+      if (job.campaign_id) {
+        await recalculateCampaignStats(job.campaign_id).catch(e => console.error('[WORKER] stats recalculation after bounce failed:', e.message));
+      }
+      return { blocked: false };
+    }
+
+    if (failureType === 'AUTH_FAILURE') {
+      // ── Sender auth failed — pause account, reschedule job, never suppress recipient ──
+      console.error(`[AUTH_FAILURE] Sender ${failureSender} authentication failed (code=${smtpCode}). Pausing account and rescheduling job ${job.id}.`);
+      if (failureSender) {
+        await pool.query(
+          `UPDATE sender_accounts SET status = 'paused', updated_at = NOW() WHERE email = ?`,
+          [failureSender]
+        ).catch(e => console.error('[AUTH_FAILURE] Failed to pause sender account:', e.message));
+      }
+      await pool.query(
+        `UPDATE email_queue SET status = 'pending', attempts = attempts + 1, last_error = ?, updated_at = NOW(), scheduled_at = NOW() + INTERVAL 30 MINUTE WHERE id = ?`,
+        [`AUTH_FAILURE: ${fullMsg.slice(0, 200)}`, job.id]
+      );
+      return { blocked: true }; // stop the current batch — sender is broken
+    }
+
+    if (failureType === 'CONNECTION_FAILURE' || failureType === 'TEMPORARY') {
+      // ── Transient error — retry later, never suppress recipient ─────────────
+      const retryDelay = failureType === 'TEMPORARY' ? 'INTERVAL 15 MINUTE' : 'INTERVAL 5 MINUTE';
+      console.log(`[${failureType}] Rescheduling job ${job.id} for ${job.lead_email} — no suppression.`);
+      await pool.query(
+        `UPDATE email_queue SET status = 'pending', attempts = attempts + 1, last_error = ?, updated_at = NOW(), scheduled_at = NOW() + ${retryDelay} WHERE id = ?`,
+        [`${failureType}: ${fullMsg.slice(0, 200)}`, job.id]
+      );
+      return { blocked: false };
+    }
+
+    // ── APP_ERROR or unknown — log only, reschedule, never suppress ───────────
+    console.error(`[APP_ERROR] Unexpected failure for job ${job.id} (${job.lead_email}): ${fullMsg.slice(0, 300)}`);
+    await pool.query(
+      `UPDATE email_queue SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = NOW(), scheduled_at = NOW() + INTERVAL 5 MINUTE WHERE id = ?`,
+      [fullMsg.slice(0, 500), job.id]
+    );
+    return { blocked: false };
   }
 }
 
@@ -392,6 +589,22 @@ async function processQueue() {
   isProcessing = true;
 
   try {
+    // Temporary queue diagnostics
+    try {
+      const { rows: [eligible] } = await pool.query(
+        `SELECT COUNT(*) AS cnt FROM email_queue WHERE status IN ('pending','failed') AND (scheduled_at IS NULL OR scheduled_at <= NOW())`
+      );
+      const { rows: [future] } = await pool.query(
+        `SELECT COUNT(*) AS cnt, MIN(scheduled_at) AS next_at FROM email_queue WHERE status IN ('pending','failed') AND scheduled_at > NOW()`
+      );
+      const { rows: [overdueJobs] } = await pool.query(
+        `SELECT COUNT(*) AS cnt FROM email_queue WHERE status IN ('pending','failed') AND scheduled_at IS NOT NULL AND scheduled_at <= NOW()`
+      );
+      console.log(`[QUEUE] Current Time=${new Date().toISOString()} EligibleJobs=${eligible.cnt} OverdueJobs=${overdueJobs.cnt} FutureScheduled=${future.cnt}`);
+    } catch (e) {
+      console.warn('[QUEUE] Diagnostics query failed:', e.message);
+    }
+
     await pool.query(`
       UPDATE email_queue SET status = 'pending'
       WHERE status = 'processing' AND updated_at < NOW() - INTERVAL 5 MINUTE
@@ -418,6 +631,7 @@ async function processQueue() {
           `UPDATE email_queue SET status = 'processing', updated_at = NOW() WHERE id IN (${ids.map(() => '?').join(',')})`,
           ids
         );
+        console.log(`[QUEUE_EXECUTION] SelectedJobs=${ids.join(',')} Count=${ids.length}`);
       }
       await client.query('COMMIT');
     } catch (txErr) {
@@ -464,7 +678,9 @@ async function processQueue() {
     // Process jobs one at a time with a delay between each to avoid send bursts
     let anyBlocked = false;
     for (let i = 0; i < jobs.length; i++) {
+      console.log(`[QUEUE_EXECUTION] Current Time=${new Date().toISOString()} ExecutingJobId=${jobs[i].id} Lead=${jobs[i].lead_email} Campaign=${jobs[i].campaign_id}`);
       const r = await processJob(jobs[i]);
+      if (!r.blocked) console.log(`[QUEUE_EXECUTION] Completed JobId=${jobs[i].id} Lead=${jobs[i].lead_email}`);
       if (r.blocked) {
         anyBlocked = true;
         console.log('[WORKER] Sender blocked — stopping batch.');
@@ -521,4 +737,28 @@ function triggerQueue() {
   scheduleImmediate();
 }
 
-module.exports = { startWorker, triggerQueue };
+async function getQueueStatus() {
+  try {
+    const { rows: [eligible] } = await pool.query(
+      `SELECT COUNT(*) AS cnt FROM email_queue WHERE status IN ('pending','failed') AND (scheduled_at IS NULL OR scheduled_at <= NOW())`
+    );
+    const { rows: [future] } = await pool.query(
+      `SELECT COUNT(*) AS cnt, MIN(scheduled_at) AS next_at FROM email_queue WHERE status IN ('pending','failed') AND scheduled_at > NOW()`
+    );
+    const { rows: [overdueJobs] } = await pool.query(
+      `SELECT COUNT(*) AS cnt FROM email_queue WHERE status IN ('pending','failed') AND scheduled_at IS NOT NULL AND scheduled_at <= NOW()`
+    );
+    return {
+      isProcessing,
+      eligible: parseInt(eligible.cnt || 0),
+      overdue: parseInt(overdueJobs.cnt || 0),
+      future: parseInt(future.cnt || 0),
+      nextAt: future.next_at || null,
+    };
+  } catch (err) {
+    console.warn('[QUEUE] getQueueStatus failed:', err.message);
+    return { isProcessing, eligible: 0, overdue: 0, future: 0, nextAt: null };
+  }
+}
+
+module.exports = { startWorker, triggerQueue, getQueueStatus };

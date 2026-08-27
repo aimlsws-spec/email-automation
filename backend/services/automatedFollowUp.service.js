@@ -21,7 +21,8 @@ const { sendEmail, injectVariables, resolveSubjectForLead } = require('./emailSe
 const { canSendEmail, incrementSenderCount, domainFromEmail } = require('./senderWarmup.service');
 const { generatePlainText } = require('../utils/plainText');
 const { addUnsubscribe, isUnsubscribed } = require('./unsubscribe.service');
-
+const { getAutomationEnabled } = require('./systemSettings.service');
+const { normalizedStatus, isCampaignFollowUpPaused, logFollowUpCheck } = require('../utils/followUpHelpers');
 // ─── Follow-up schedule: [{ day, templateSlot }] ────────────────────────────
 // templateSlot 1 = "FOLLOW UP (VIRALKAR)", 2 = "FOLLOW UP 2 (VIRALKAR)"
 const FOLLOWUP_SCHEDULE = [
@@ -155,6 +156,19 @@ function getNextStageEntry(currentStage) {
   return FOLLOWUP_SCHEDULE.find(s => s.stage === currentStage + 1) || null;
 }
 
+async function getSendUserId(lead) {
+  if (lead.user_id) return lead.user_id;
+  if (lead.campaign_user_id) return lead.campaign_user_id;
+  if (lead.campaign_id) {
+    const { rows } = await pool.query(
+      `SELECT user_id FROM campaigns WHERE id = ? LIMIT 1`,
+      [lead.campaign_id]
+    );
+    return rows[0]?.user_id || null;
+  }
+  return null;
+}
+
 /**
  * Calculate the next follow-up datetime based on the INITIAL send date.
  * This ensures Day 1 = 1 day after initial, Day 3 = 3 days after initial, etc.
@@ -192,25 +206,6 @@ function shouldSendFollowUp(lead) {
   return { ok: true };
 }
 
-function normalizedStatus(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function isCampaignPaused(lead) {
-  if (lead.campaign_followup_enabled === 0 || lead.campaign_followup_enabled === false) return true;
-  return ['paused', 'archived', 'stopped', 'cancelled', 'canceled'].includes(normalizedStatus(lead.campaign_status));
-}
-
-function logFollowUpCheck(lead, automationEnabled, isSelected) {
-  const followupStatus = lead.campaign_followup_enabled === 0 || lead.campaign_followup_enabled === false
-    ? 'paused'
-    : normalizedStatus(lead.campaign_status) || 'active';
-
-  console.log(
-    `[FOLLOWUP_CHECK] campaign_id=${lead.campaign_id || ''} campaign_name=${JSON.stringify(lead.campaign_name || '')} ` +
-    `automation_status=${automationEnabled ? 'active' : 'paused'} followup_status=${followupStatus} is_selected=${isSelected}`
-  );
-}
 
 // ─── Core send logic ─────────────────────────────────────────────────────────
 
@@ -221,7 +216,7 @@ async function sendFollowUp(lead) {
 
   if (!schedEntry) {
     console.log(`[FOLLOWUP_AUTO] No schedule entry for stage ${nextStage} — stopping`);
-    await stopFollowUp(lead.email, 'max_stage_reached');
+    await stopFollowUp(lead.email, 'max_stage_reached', lead.campaign_id);
     return null;
   }
 
@@ -247,6 +242,11 @@ async function sendFollowUp(lead) {
 
   console.log(`[FOLLOWUP_AUTO] Sending stage ${nextStage} (${template.name}) to ${lead.email} | subject="${emailSubject}" | inReplyTo=${inReplyTo || 'none'}`);
 
+  const userId = await getSendUserId(lead);
+  if (!userId) {
+    console.warn(`[FOLLOWUP_AUTO] Missing userId for follow-up send to ${lead.email}. Using campaign or lead derived user_id if available.`);
+  }
+
   const result = await sendEmail({
     to:           lead.email,
     subject:      emailSubject,
@@ -260,6 +260,7 @@ async function sendFollowUp(lead) {
     campaignId:   lead.campaign_id,
     recipientName: lead.name || '',
     lead,
+    userId,
   });
 
   // Determine next schedule
@@ -280,7 +281,7 @@ async function sendFollowUp(lead) {
         thread_id         = CASE WHEN ? != '' THEN ? ELSE thread_id END,
         status            = ?,
         last_subject      = ?
-    WHERE email = ?
+    WHERE email = ? AND campaign_id = ?
   `, [
     nextStage,
     nextFollowUpAt,
@@ -289,18 +290,19 @@ async function sendFollowUp(lead) {
     `Follow-up ${nextStage}`,
     emailSubject,
     lead.email,
+    lead.campaign_id,
   ]);
 
   // Log the follow-up activity
   await pool.query(`
-    INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, template_used, status, message_id, thread_id, sent_at)
-    VALUES (?, ?, ?, ?, 'sent', ?, ?, NOW())
-  `, [lead.email, lead.campaign_id, nextStage, template.name, result.messageId || '', result.threadId || ''])
+    INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, template_used, status, message_id, thread_id, sent_at, user_id)
+    VALUES (?, ?, ?, ?, 'sent', ?, ?, NOW(), ?)
+  `, [lead.email, lead.campaign_id, nextStage, template.name, result.messageId || '', result.threadId || '', userId])
   .catch(err => console.error('[FOLLOWUP_AUTO] Log insert failed:', err.message));
 
   // If no more stages, mark as completed
   if (!afterNextEntry) {
-    await stopFollowUp(lead.email, 'sequence_complete');
+    await stopFollowUp(lead.email, 'sequence_complete', lead.campaign_id);
   }
 
   console.log(`[FOLLOWUP_AUTO] ✓ Stage ${nextStage} sent to ${lead.email} via ${senderEmail}`);
@@ -309,29 +311,45 @@ async function sendFollowUp(lead) {
 
 // ─── Stop follow-up for a lead ───────────────────────────────────────────────
 
-async function stopFollowUp(email, reason) {
+async function stopFollowUp(email, reason, campaignId = null) {
+  const whereClause = campaignId
+    ? `WHERE email = ? AND campaign_id = ?`
+    : `WHERE email = ?`;
+  const params = campaignId ? [reason, email, campaignId] : [reason, email];
+
   await pool.query(`
     UPDATE leads
     SET followup_enabled = 0,
         followup_stopped_reason = ?,
         next_follow_up_at = NULL
-    WHERE email = ?
-  `, [reason, email]);
+    ${whereClause}
+  `, params);
 
+  const logParams = campaignId ? [reason, email, campaignId] : [reason, email];
+  const logWhere = campaignId
+    ? `WHERE email = ? AND campaign_id = ?`
+    : `WHERE email = ?`;
   await pool.query(`
-    INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, status, stopped_reason, sent_at)
-    SELECT email, campaign_id, COALESCE(follow_up_step, 0), 'stopped', ?, NOW()
-    FROM leads WHERE email = ?
-  `, [reason, email]).catch(() => {});
+    INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, status, stopped_reason, sent_at, user_id)
+    SELECT email, campaign_id, COALESCE(follow_up_step, 0), 'stopped', ?, NOW(), user_id
+    FROM leads ${logWhere}
+  `, logParams).catch(() => {});
 
-  console.log(`[FOLLOWUP_AUTO] Stopped follow-up for ${email} — reason: ${reason}`);
+  console.log(`[FOLLOWUP_AUTO] Stopped follow-up for ${email} campaign=${campaignId || 'all'} — reason: ${reason}`);
 }
 
 // ─── Schedule initial follow-up after first send ────────────────────────────
 
-async function scheduleInitialFollowUp(leadEmail, messageId, threadId, initialSentAt) {
+async function scheduleInitialFollowUp(leadEmail, messageId, threadId, initialSentAt, campaignId = null) {
   const firstEntry = FOLLOWUP_SCHEDULE[0]; // Day 1
   const nextAt = calcNextFollowUpAt(initialSentAt || new Date(), firstEntry.day);
+
+  const whereClause = campaignId
+    ? `WHERE email = ? AND campaign_id = ?`
+    : `WHERE email = ?`;
+  const params = campaignId
+    ? [nextAt, messageId || '', messageId || '', threadId || '', threadId || '', leadEmail, campaignId]
+    : [nextAt, messageId || '', messageId || '', threadId || '', threadId || '', leadEmail];
 
   await pool.query(`
     UPDATE leads
@@ -341,20 +359,17 @@ async function scheduleInitialFollowUp(leadEmail, messageId, threadId, initialSe
         message_id        = CASE WHEN ? != '' THEN ? ELSE message_id END,
         thread_id         = CASE WHEN ? != '' THEN ? ELSE thread_id END,
         last_sent_at      = NOW()
-    WHERE email = ?
-  `, [
-    nextAt,
-    messageId || '', messageId || '',
-    threadId  || '', threadId  || '',
-    leadEmail,
-  ]);
+    ${whereClause}
+  `, params);
 
-  console.log(`[FOLLOWUP_AUTO] Scheduled first follow-up for ${leadEmail} at ${nextAt.toISOString()}`);
+  console.log(`[FOLLOWUP_CREATE] Automated Campaign=${campaignId || 'auto'} Lead=${leadEmail} Stage=1 ScheduledAt=${nextAt.toISOString()} MessageId=${messageId || ''}`);
+
 }
 
 // ─── Main scheduler (runs every N minutes via cron) ─────────────────────────
 
 let schedulerRunning = false;
+let lastSchedulerTick = null;
 
 async function isGlobalAutomationEnabled() {
   try {
@@ -368,7 +383,34 @@ async function isGlobalAutomationEnabled() {
 }
 
 async function runAutomatedFollowUpScheduler() {
-  console.log('[AUTO FOLLOWUP] Scheduler tick', new Date().toISOString());
+  lastSchedulerTick = new Date().toISOString();
+  console.log('[AUTO FOLLOWUP] Scheduler tick', lastSchedulerTick);
+
+  // Temporary scheduler diagnostics
+  try {
+    const now = new Date().toISOString();
+    const { rows: [pendingRow] } = await pool.query(`
+      SELECT COUNT(*) AS cnt FROM leads
+      WHERE (followup_enabled = 1 OR followup_enabled IS NULL)
+        AND next_follow_up_at IS NOT NULL
+    `);
+    const { rows: [overdueRow] } = await pool.query(`
+      SELECT COUNT(*) AS cnt FROM leads
+      WHERE (followup_enabled = 1 OR followup_enabled IS NULL)
+        AND next_follow_up_at IS NOT NULL
+        AND next_follow_up_at <= NOW()
+    `);
+    const { rows: [queuePending] } = await pool.query(`
+      SELECT COUNT(*) AS cnt FROM email_queue
+      WHERE status IN ('pending','failed')
+        AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+        AND (type LIKE 'follow_up%' OR type = 'manual_followup')
+    `).catch(() => [{ cnt: 0 }]);
+
+    console.log(`[SCHEDULER] Current Time=${now} PendingLeads=${pendingRow.cnt} OverdueLeads=${overdueRow.cnt} PendingFollowupJobs=${queuePending.cnt} schedulerRunning=${schedulerRunning}`);
+  } catch (e) {
+    console.warn('[SCHEDULER] Diagnostics query failed:', e.message);
+  }
 
   if (schedulerRunning) {
     console.log('[FOLLOWUP_AUTO] Scheduler already running — skipping');
@@ -408,7 +450,7 @@ async function runAutomatedFollowUpScheduler() {
         AND (c.followup_enabled = 1 OR c.followup_enabled IS NULL)
         AND (c.status IS NULL OR LOWER(c.status) NOT IN ('paused', 'archived', 'stopped', 'cancelled', 'canceled'))
       ORDER BY l.next_follow_up_at ASC
-      LIMIT 30
+      LIMIT 500
     `, [MAX_STAGE]);
 
     console.log(`[AUTO FOLLOWUP] Due leads found: ${dueleads.length}`);
@@ -424,7 +466,7 @@ async function runAutomatedFollowUpScheduler() {
         // Double-check both suppression_list and unsubscribed_contacts
         const suppressed = await isUnsubscribed(lead.email);
         if (suppressed) {
-          await stopFollowUp(lead.email, 'suppressed');
+          await stopFollowUp(lead.email, 'suppressed', lead.campaign_id);
           skipped++;
           continue;
         }
@@ -434,7 +476,7 @@ async function runAutomatedFollowUpScheduler() {
         if (!check.ok) {
           console.log(`[FOLLOWUP_AUTO] Skip ${lead.email} — ${check.reason}`);
           if (['replied', 'bounced', 'unsubscribed'].includes(check.reason)) {
-            await stopFollowUp(lead.email, check.reason);
+            await stopFollowUp(lead.email, check.reason, lead.campaign_id);
           }
           skipped++;
           continue;
@@ -448,7 +490,7 @@ async function runAutomatedFollowUpScheduler() {
         );
         const latestLeadState = { ...lead, ...(latestCampaignRows[0] || {}) };
         logFollowUpCheck(latestLeadState, latestAutomationEnabled, false);
-        if (!latestAutomationEnabled || isCampaignPaused(latestLeadState)) {
+        if (!latestAutomationEnabled || isCampaignFollowUpPaused(latestLeadState)) {
           console.log(`[FOLLOWUP_SKIP] campaign_id=${lead.campaign_id || ''} reason=paused`);
           skipped++;
           continue;
@@ -481,7 +523,7 @@ async function runAutomatedFollowUpScheduler() {
             await pool.query(`UPDATE leads SET follow_up_step = ?, next_follow_up_at = ? WHERE email = ?`,
               [(lead.follow_up_step ?? 0) + 1, nextAt, lead.email]);
           } else {
-            await stopFollowUp(lead.email, 'sequence_complete');
+            await stopFollowUp(lead.email, 'sequence_complete', lead.campaign_id);
           }
           skipped++;
           continue;
@@ -507,10 +549,11 @@ async function runAutomatedFollowUpScheduler() {
         console.error(`[FOLLOWUP_AUTO] Failed for ${lead.email}:`, err.message);
 
         // Log the failure
+        const errUserId = lead.user_id || await getSendUserId(lead) || 1;
         await pool.query(`
-          INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, status, stopped_reason, sent_at)
-          VALUES (?, ?, ?, 'failed', ?, NOW())
-        `, [lead.email, lead.campaign_id, (lead.follow_up_step ?? 0) + 1, err.message])
+          INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, status, stopped_reason, sent_at, user_id)
+          VALUES (?, ?, ?, 'failed', ?, NOW(), ?)
+        `, [lead.email, lead.campaign_id, (lead.follow_up_step ?? 0) + 1, err.message, errUserId])
         .catch(() => {});
       }
     }
@@ -523,35 +566,57 @@ async function runAutomatedFollowUpScheduler() {
   }
 }
 
+function getSchedulerStatus() {
+  return { schedulerRunning, lastSchedulerTick };
+}
+
 // ─── Reply detection integration ─────────────────────────────────────────────
 
-async function handleReplyDetected(leadEmail, subject = '', body = '') {
+async function handleReplyDetected(leadEmail, campaignId = null, subject = '', body = '') {
   // Ignore auto-responders
   if (isAutoReply(subject, body)) {
     console.log(`[FOLLOWUP_AUTO] Auto-reply ignored for ${leadEmail}`);
     return false;
   }
 
-  await pool.query(`
-    UPDATE leads
-    SET has_replied          = 1,
-        replied              = 1,
-        replied_at           = NOW(),
-        followup_enabled     = 0,
-        followup_stopped_reason = 'replied',
-        next_follow_up_at    = NULL,
-        status               = 'Replied',
-        last_activity_at     = NOW()
-    WHERE email = ?
-  `, [leadEmail]);
+  // If no campaignId provided, look it up (for backward compatibility)
+  if (!campaignId) {
+    const { rows: leads } = await pool.query(
+      `SELECT campaign_id FROM leads WHERE email = ? LIMIT 1`,
+      [leadEmail]
+    );
+    campaignId = leads[0]?.campaign_id || null;
+  }
 
-  await pool.query(`
-    INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, status, stopped_reason, sent_at)
-    SELECT email, campaign_id, COALESCE(follow_up_step, 0), 'stopped', 'replied', NOW()
-    FROM leads WHERE email = ?
-  `, [leadEmail]).catch(() => {});
+  if (campaignId) {
+    await pool.query(`
+      UPDATE leads
+      SET has_replied          = 1,
+          replied              = 1,
+          replied_at           = NOW(),
+          followup_enabled     = 0,
+          followup_stopped_reason = 'replied',
+          next_follow_up_at    = NULL,
+          status               = 'Replied',
+          last_activity_at     = NOW()
+      WHERE email = ? AND campaign_id = ?
+    `, [leadEmail, campaignId]);
 
-  console.log(`[FOLLOWUP_AUTO] Reply detected — stopped follow-up for ${leadEmail}`);
+    await pool.query(`
+      INSERT INTO followup_logs (lead_email, campaign_id, followup_stage, status, stopped_reason, sent_at, user_id)
+      SELECT email, campaign_id, COALESCE(follow_up_step, 0), 'stopped', 'replied', NOW(), user_id
+      FROM leads WHERE email = ? AND campaign_id = ?
+    `, [leadEmail, campaignId]).catch(() => {});
+
+    console.log(`[FOLLOWUP_AUTO] Reply detected — stopped follow-up for ${leadEmail} campaign=${campaignId}`);
+
+    await recalculateCampaignStats(campaignId).catch(err =>
+      console.error(`[FOLLOWUP_AUTO] recalculateCampaignStats failed for campaign ${campaignId}:`, err.message)
+    );
+  } else {
+    console.warn(`[FOLLOWUP_AUTO] Reply detected for ${leadEmail} but no campaignId found — skipping`);
+  }
+
   return true;
 }
 
@@ -566,6 +631,10 @@ async function handleUnsubscribe(email, campaignId = null, ipAddress = null, use
   `, [email, campaignId, ipAddress, userAgent]);
 
   // Stop all follow-ups and mark lead as unsubscribed
+  const whereClause = campaignId
+    ? `WHERE email = ? AND campaign_id = ?`
+    : `WHERE email = ?`;
+  const params = campaignId ? [email, campaignId] : [email];
   await pool.query(`
     UPDATE leads
     SET unsubscribed         = 1,
@@ -575,8 +644,8 @@ async function handleUnsubscribe(email, campaignId = null, ipAddress = null, use
         next_follow_up_at    = NULL,
         status               = 'Unsubscribed',
         last_activity_at     = NOW()
-    WHERE email = ?
-  `, [email]);
+    ${whereClause}
+  `, params);
 
   // Write to unsubscribed_contacts — this is what Unsubscribe Management reads
   await addUnsubscribe({ email, campaignId, ipAddress, userAgent, source: 'email_link' })
@@ -587,7 +656,23 @@ async function handleUnsubscribe(email, campaignId = null, ipAddress = null, use
 
 // ─── Bounce handling ──────────────────────────────────────────────────────────
 
-async function handleBounce(email) {
+const { recordSuppression, isHardBounce } = require('./suppression.service');
+const { recalculateCampaignStats } = require('./campaignStats.service');
+
+async function handleBounce(email, errorMessage = '', smtpCode = '', campaignId = null) {
+  if (!campaignId) {
+    const { rows: leads } = await pool.query(
+      `SELECT campaign_id FROM leads WHERE email = ? LIMIT 1`,
+      [email]
+    );
+    campaignId = leads[0]?.campaign_id || null;
+  }
+
+  const whereClause = campaignId
+    ? `WHERE email = ? AND campaign_id = ?`
+    : `WHERE email = ?`;
+  const params = campaignId ? [email, campaignId] : [email];
+
   await pool.query(`
     UPDATE leads
     SET is_bounced           = 1,
@@ -596,10 +681,27 @@ async function handleBounce(email) {
         next_follow_up_at    = NULL,
         status               = 'Bounced',
         last_activity_at     = NOW()
-    WHERE email = ?
-  `, [email]);
+    ${whereClause}
+  `, params);
 
-  console.log(`[FOLLOWUP_AUTO] Bounce recorded — stopped follow-up for ${email}`);
+  console.log(`[FOLLOWUP_AUTO] Bounce recorded — stopped follow-up for ${email} campaign=${campaignId || 'all'}`);
+  
+  if (isHardBounce(errorMessage, smtpCode)) {
+    console.log(`[FOLLOWUP_AUTO] Hard bounce detected for ${email}, recording suppression`);
+    await recordSuppression(email, { 
+      reason: 'Hard Bounce', 
+      bounceType: 'Hard Bounce', 
+      smtpCode: smtpCode, 
+      failureReason: errorMessage,
+      campaignId,
+    });
+  }
+
+  if (campaignId) {
+    await recalculateCampaignStats(campaignId).catch(err =>
+      console.error(`[FOLLOWUP_AUTO] recalculateCampaignStats failed for campaign ${campaignId}:`, err.message)
+    );
+  }
 }
 
 // ─── Pause / Resume controls ──────────────────────────────────────────────────
@@ -682,7 +784,13 @@ async function getFollowUpAnalytics(campaignId = null) {
     ${where}
   `, params);
 
-  return { stageSummary, totals: totals || {} };
+  const normalizedTotals = {
+    ...(totals || {}),
+    in_sequence: totals?.in_sequence || 0,
+    pending: totals?.pending || 0,
+  };
+
+  return { stageSummary, totals: normalizedTotals };
 }
 
 async function getLeadFollowUpTimeline(email) {

@@ -8,6 +8,7 @@ import { SidebarToggleBtn } from "components/shared/SidebarToggleBtn";
 import { Button } from "components/ui";
 import { Search } from "components/template/Search";
 import { useThemeContext } from "app/contexts/theme/context";
+import { UserMenu } from "components/shared/UserMenu";
 
 // ----------------------------------------------------------------------
 
@@ -72,6 +73,7 @@ export function Header() {
             </>
           )}
         />
+        <UserMenu />
       </div>
     </header>
   );
